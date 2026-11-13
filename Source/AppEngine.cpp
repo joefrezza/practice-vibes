@@ -4,6 +4,12 @@
 namespace pv
 {
 
+namespace
+{
+    // Our own attribute in the device-state XML; JUCE ignores unknown attributes.
+    const juce::Identifier followAttribute { "pvFollowSystemOutput" };
+}
+
 AppEngine::AppEngine()
 {
     juce::addDefaultFormatsToManager (formatManager);
@@ -25,6 +31,7 @@ AppEngine::AppEngine()
 AppEngine::~AppEngine()
 {
     alive.reset();
+    deviceManager.removeChangeListener (this);
     midi.reset();
     catalogue.reset();
     player = nullptr;
@@ -46,10 +53,33 @@ void AppEngine::start()
             juce::Logger::writeToLog ("Audio input permission was NOT granted: the guitar input will be silent");
 
         auto savedState = juce::parseXML (getDeviceStateFile());
+
+        if (savedState != nullptr)
+        {
+            followSystemOutput = savedState->getBoolAttribute (followAttribute, false);
+
+            // The saved output name is stale when following: open today's default instead.
+            if (followSystemOutput)
+                for (auto* type : deviceManager.getAvailableDeviceTypes())
+                    if (type->getTypeName() == savedState->getStringAttribute ("deviceType"))
+                    {
+                        type->scanForDevices();
+                        const auto defaultName = type->getDeviceNames (false)[type->getDefaultDeviceIndex (false)];
+
+                        if (defaultName.isNotEmpty())
+                            savedState->setAttribute ("audioOutputDeviceName", defaultName);
+                    }
+        }
+
         const auto error = deviceManager.initialise (granted ? 2 : 0, 2, savedState.get(), true);
 
         if (error.isNotEmpty())
             juce::Logger::writeToLog ("Audio device error: " + error);
+
+        lastOutputName = deviceManager.getAudioDeviceSetup().outputDeviceName;
+        juce::Logger::writeToLog (followSystemOutput ? "Output follows the system default output"
+                                                     : "Output fixed to the device chosen in the audio settings");
+        deviceManager.addChangeListener (this);
 
         logAudioDeviceInfo();
 
@@ -61,11 +91,66 @@ void AppEngine::start()
 void AppEngine::saveState()
 {
     if (auto deviceXml = deviceManager.createStateXml())
+    {
+        deviceXml->setAttribute (followAttribute, followSystemOutput);
         deviceXml->writeTo (getDeviceStateFile());
+    }
 
     if (auto chainXml = chain->createStateXml())
         if (chainXml->writeTo (getChainFile()))
             juce::Logger::writeToLog ("Saved chain to " + getChainFile().getFullPathName());
+}
+
+juce::String AppEngine::getSystemDefaultOutputName() const
+{
+    if (auto* type = deviceManager.getCurrentDeviceTypeObject())
+        return type->getDeviceNames (false)[type->getDefaultDeviceIndex (false)];
+
+    return {};
+}
+
+// Called (asynchronously) after any device change: the user editing the audio settings,
+// a device appearing/disappearing, or the OS default output changing (JUCE's WASAPI type
+// reports that as a device-list change, but keeps the old device open).
+void AppEngine::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    auto setup = deviceManager.getAudioDeviceSetup();
+    const auto defaultName = getSystemDefaultOutputName();
+    const bool outputChanged = setup.outputDeviceName != lastOutputName;
+    lastOutputName = setup.outputDeviceName;
+
+    if (! followSystemOutput)
+    {
+        // Picking the current default (or JUCE falling back to it after the chosen
+        // device was unplugged) goes back to following.
+        if (outputChanged && defaultName.isNotEmpty() && setup.outputDeviceName == defaultName)
+        {
+            followSystemOutput = true;
+            juce::Logger::writeToLog ("Output follows the system default output again");
+        }
+
+        return;
+    }
+
+    if (outputChanged && setup.outputDeviceName != defaultName)
+    {
+        followSystemOutput = false;
+        juce::Logger::writeToLog ("Output fixed to " + setup.outputDeviceName + " (chosen in the audio settings)");
+        return;
+    }
+
+    if (defaultName.isEmpty() || setup.outputDeviceName == defaultName)
+        return;
+
+    juce::Logger::writeToLog ("System default output changed: switching to " + defaultName);
+    setup.outputDeviceName = defaultName;
+    lastOutputName = defaultName;
+
+    // Not "chosen": the saved state keeps meaning "follow the default".
+    const auto error = deviceManager.setAudioDeviceSetup (setup, false);
+
+    if (error.isNotEmpty())
+        juce::Logger::writeToLog ("Could not switch output: " + error);
 }
 
 void AppEngine::logAudioDeviceInfo()

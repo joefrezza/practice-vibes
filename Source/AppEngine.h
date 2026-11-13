@@ -11,7 +11,7 @@ namespace pv
 {
 
 /** Owns the non-UI parts of the app: audio device, plugin formats, the chain, MIDI. */
-class AppEngine final
+class AppEngine final : private juce::ChangeListener
 {
 public:
     AppEngine();
@@ -37,6 +37,17 @@ public:
     MetronomeProcessor* metronome = nullptr;
 
 private:
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
+
+    /** Name of the system default output for the current device type ("" if unknown). */
+    juce::String getSystemDefaultOutputName() const;
+
+    // While true, the output device tracks the OS default output (like normal apps do).
+    // It becomes false when the user picks a different output in the audio settings,
+    // and true again when they pick the current default.
+    bool followSystemOutput = true;
+    juce::String lastOutputName;
+
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppEngine)
