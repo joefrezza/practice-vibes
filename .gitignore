@@ -1,0 +1,19 @@
+# Build output
+build/
+out/
+cmake-build-*/
+
+# Editor / IDE state (may contain machine-specific paths)
+.vs/
+.vscode/
+*.user
+
+# Local-only files that are never published
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+notes/
+
+# OS clutter
+.DS_Store
+Thumbs.db
