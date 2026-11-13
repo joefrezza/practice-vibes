@@ -98,7 +98,8 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
                                                              &rewindButton, &playButton, &stopButton, &setAButton, &setBButton,
                                                              &loopButton, &clearLoopButton, &speedSlider, &pitchSlider,
                                                              &zoomOutButton, &zoomInButton, &fitButton, &zoomLoopButton,
-                                                             &songVolumeSlider, &speedLabel, &pitchLabel, &songVolumeLabel, &hintLabel })
+                                                             &songVolumeSlider, &speedLabel, &pitchLabel, &songVolumeLabel, &hintLabel,
+                                                             &chordView })
         addAndMakeVisible (c);
 
     openButton.onClick = [this] { openFile(); };
@@ -284,6 +285,58 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
 PracticePanel::~PracticePanel()
 {
     stopTimer();
+
+    if (chordCancel != nullptr)
+        *chordCancel = true;
+
+    chordPool.removeAllJobs (true, 10000);
+}
+
+void PracticePanel::startChordAnalysis (std::shared_ptr<const LoadedSong> song)
+{
+    if (chordCancel != nullptr)
+        *chordCancel = true;
+
+    waveform.setChords (nullptr);
+    chordView.setTrack (nullptr, song != nullptr ? "Analysing chords..." : "");
+
+    if (song == nullptr)
+        return;
+
+    auto cancel = std::make_shared<std::atomic<bool>> (false);
+    chordCancel = cancel;
+
+    chordPool.addJob ([song, cancel, safeThis = SafePointer<PracticePanel> (this)]
+    {
+        const auto length = song->audio.getNumSamples();
+        std::vector<float> mono ((size_t) length);
+        const auto* left = song->audio.getReadPointer (0);
+        const auto* right = song->audio.getReadPointer (1);
+
+        for (int i = 0; i < length; ++i)
+            mono[(size_t) i] = 0.5f * (left[i] + right[i]);
+
+        const auto startTime = juce::Time::getMillisecondCounterHiRes();
+        auto track = std::make_shared<const ChordTrack> (analyseChords (mono.data(), length, song->sampleRate, cancel.get()));
+
+        if (*cancel)
+            return;
+
+        juce::Logger::writeToLog ("Chords: " + juce::String ((int) track->chords.size()) + " segments, ~"
+                                  + juce::String (track->bpm, 1) + " bpm, key " + track->keyName() + ", tuning "
+                                  + juce::String (track->tuningCents, 0) + " cents, "
+                                  + juce::String (juce::roundToInt (juce::Time::getMillisecondCounterHiRes() - startTime)) + " ms");
+
+        juce::MessageManager::callAsync ([safeThis, song, track, cancel]
+        {
+            if (safeThis == nullptr || *cancel || safeThis->shownSong != song)
+                return;
+
+            const auto found = ! track->chords.empty();
+            safeThis->chordView.setTrack (found ? track : nullptr, found ? juce::String() : juce::String ("No chords found in this song."));
+            safeThis->waveform.setChords (found ? track : nullptr);
+        });
+    });
 }
 
 //==============================================================================
@@ -384,6 +437,7 @@ void PracticePanel::timerCallback()
         pendingLoopStart = -1.0;
         waveform.songChanged();
         updateLoopButtons();
+        startChordAnalysis (song);
     }
 
     const auto hasSong = player.hasSong();
@@ -397,6 +451,10 @@ void PracticePanel::timerCallback()
 
     if (hasSong)
         waveform.refresh();
+
+    const auto transpose = juce::roundToInt (pitchSlider.getValue());
+    chordView.update (player.getPositionSeconds(), transpose);
+    waveform.setChordTranspose (transpose);
 
     metronomeButton.setButtonText (metronome.isRunning() ? "Stop metronome" : "Start metronome");
     bpmDisplay.setText (juce::String (juce::roundToInt (metronome.isRunning() ? metronome.getCurrentBpm()
@@ -461,6 +519,8 @@ void PracticePanel::resized()
     sliderRow (left, pitchLabel, pitchSlider);
     sliderRow (left, songVolumeLabel, songVolumeSlider);
     hintLabel.setBounds (left.removeFromTop (30));
+    left.removeFromTop (6);
+    chordView.setBounds (left.withHeight (juce::jmin (left.getHeight(), 220)));
 
     // Metronome column
     auto metroTop = right.removeFromTop (48);

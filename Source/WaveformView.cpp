@@ -8,6 +8,7 @@ namespace
 {
     constexpr int overviewHeight = 30;
     constexpr int rulerHeight = 18;
+    constexpr int chordLaneHeight = 22;
     constexpr float edgeGrabDistance = 14.0f;
     const auto waveformColour = juce::Colour (0xff8fb3d9);
 
@@ -154,6 +155,7 @@ void WaveformView::paint (juce::Graphics& g)
         juce::Graphics::ScopedSaveState state (g);
         g.reduceClipRegion (mainArea);
         paintWaveform (g, mainArea);
+        paintChordLane (g, mainArea);
         paintTimeRuler (g, mainArea.withHeight (rulerHeight));
     }
 
@@ -162,7 +164,7 @@ void WaveformView::paint (juce::Graphics& g)
 
 void WaveformView::paintWaveform (juce::Graphics& g, juce::Rectangle<int> area)
 {
-    const auto top = (float) area.getY() + rulerHeight;
+    const auto top = (float) area.getY() + rulerHeight + (chords != nullptr ? chordLaneHeight : 0);
     const auto height = (float) area.getBottom() - top;
     const auto mid = top + height * 0.5f;
     const auto halfHeight = height * 0.5f - 3.0f;
@@ -267,6 +269,86 @@ void WaveformView::paintWaveform (juce::Graphics& g, juce::Rectangle<int> area)
     // Playhead
     g.setColour (juce::Colours::white);
     g.fillRect (juce::Rectangle<float> (secondsToX (player.getPositionSeconds()) - 1.0f, (float) area.getY(), 2.0f, (float) area.getHeight()));
+}
+
+void WaveformView::setChords (std::shared_ptr<const ChordTrack> newChords)
+{
+    chords = std::move (newChords);
+    repaint();
+}
+
+void WaveformView::setChordTranspose (int semitones)
+{
+    if (semitones != chordTranspose)
+    {
+        chordTranspose = semitones;
+        repaint();
+    }
+}
+
+void WaveformView::paintChordLane (juce::Graphics& g, juce::Rectangle<int> area)
+{
+    if (chords == nullptr || chords->chords.empty())
+        return;
+
+    const auto viewEnd = viewStart + viewLength;
+    const auto top = (float) area.getY() + rulerHeight;
+    const auto lane = juce::Rectangle<float> ((float) area.getX(), top, (float) area.getWidth(), (float) chordLaneHeight);
+
+    // Faint bar lines through the waveform, when they are not too dense.
+    const auto& beats = chords->beats;
+    const auto barPixels = 4.0 * (beats.size() > 1 ? (beats.back() - beats.front()) / (double) (beats.size() - 1) : 1.0)
+                               / viewLength * area.getWidth();
+
+    if (barPixels > 12.0)
+    {
+        const auto first = (size_t) std::distance (beats.begin(), std::lower_bound (beats.begin(), beats.end(), viewStart));
+
+        for (auto i = first; i < beats.size() && beats[i] <= viewEnd; ++i)
+        {
+            const auto downbeat = chords->isDownbeat ((int) i);
+
+            if (! downbeat && barPixels < 120.0)
+                continue;
+
+            g.setColour (juce::Colours::white.withAlpha (downbeat ? 0.10f : 0.04f));
+            g.fillRect (juce::Rectangle<float> (secondsToX (beats[i]), top, 1.0f, (float) area.getBottom() - top));
+        }
+    }
+
+    g.setColour (juce::Colours::black.withAlpha (0.3f));
+    g.fillRect (lane);
+
+    const auto position = player.getPositionSeconds();
+    g.setFont (juce::FontOptions (13.0f).withStyle ("Bold"));
+
+    for (const auto& chord : chords->chords)
+    {
+        if (chord.end < viewStart || chord.start > viewEnd)
+            continue;
+
+        const auto x1 = secondsToX (chord.start), x2 = secondsToX (chord.end);
+        const auto isCurrent = position >= chord.start && position < chord.end;
+
+        if (isCurrent)
+        {
+            g.setColour (theme::highlight.withAlpha (0.18f));
+            g.fillRect (juce::Rectangle<float> (x1, lane.getY(), x2 - x1, lane.getHeight()));
+        }
+
+        g.setColour (juce::Colours::white.withAlpha (0.3f));
+        g.fillRect (juce::Rectangle<float> (x1, lane.getY(), 1.0f, lane.getHeight()));
+
+        // Keep the name visible while its chord scrolls off the left edge.
+        const auto textX = juce::jmax (x1, lane.getX()) + 4.0f;
+
+        if (x2 - textX < 16.0f || chord.root < 0)
+            continue;
+
+        g.setColour (isCurrent ? theme::highlight : juce::Colours::white.withAlpha (0.8f));
+        g.drawText (chords->chordName (chord, chordTranspose), juce::Rectangle<float> (textX, lane.getY(), x2 - textX - 2.0f, lane.getHeight()),
+                    juce::Justification::centredLeft, true);
+    }
 }
 
 void WaveformView::paintTimeRuler (juce::Graphics& g, juce::Rectangle<int> area)

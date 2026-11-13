@@ -1,6 +1,7 @@
 // Offline checks of the song player and metronome DSP. Run: PracticeVibesTests(.exe)
 // Exit code 0 = all passed.
 
+#include "../Source/ChordAnalyzer.h"
 #include "../Source/MetronomeProcessor.h"
 #include "../Source/PlayerProcessor.h"
 
@@ -326,6 +327,99 @@ namespace
             check (std::abs (metronome.getCurrentBpm() - 140.0) < 0.01, "capped at max 140: " + juce::String (metronome.getCurrentBpm()));
         }
     }
+
+    /** A synthetic band: 120 bpm, kick on every beat, bass + harmonic-rich triads, C | Am | F | G. */
+    void testChordAnalysis()
+    {
+        std::cout << "Chord analysis" << std::endl;
+
+        constexpr double sampleRate = 44100.0, bpm = 120.0;
+        constexpr int bars = 16;
+        const auto beatSeconds = 60.0 / bpm;
+        const auto length = (int) (sampleRate * beatSeconds * 4 * bars);
+        std::vector<float> audio ((size_t) length, 0.0f);
+
+        struct TestChord { int root; bool minor; };
+        const TestChord progression[] = { { 0, false }, { 9, true }, { 5, false }, { 7, false } };
+        auto midiToHz = [] (double midi) { return 440.0 * std::pow (2.0, (midi - 69.0) / 12.0); };
+        juce::Random random (42);
+
+        for (int i = 0; i < length; ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto beat = (int) (t / beatSeconds);
+            const auto sinceBeat = t - beat * beatSeconds;
+            const auto& chord = progression[(beat / 4) % 4];
+            const auto triadBase = 60 + (chord.root > 4 ? chord.root - 12 : chord.root);
+            const int notes[] = { triadBase, triadBase + (chord.minor ? 3 : 4), triadBase + 7 };
+            auto sample = 0.0;
+
+            for (auto note : notes)
+                for (int h = 1; h <= 5; ++h)
+                    sample += 0.08 / h * std::sin (juce::MathConstants<double>::twoPi * midiToHz (note) * h * t);
+
+            const auto bassNote = 36 + chord.root;
+            sample += 0.2 * std::sin (juce::MathConstants<double>::twoPi * midiToHz (bassNote) * t) * std::exp (-sinceBeat * 3.0);
+            sample += 0.5 * std::exp (-sinceBeat * 40.0) * (std::sin (juce::MathConstants<double>::twoPi * 60.0 * sinceBeat)
+                                                             + 0.3 * (random.nextFloat() * 2.0f - 1.0f));
+            audio[(size_t) i] = (float) (0.5 * sample);
+        }
+
+        const auto track = analyseChords (audio.data(), length, sampleRate);
+
+        const auto tempoOk = std::abs (track.bpm - bpm) < 3.0 || std::abs (track.bpm - bpm / 2) < 1.5 || std::abs (track.bpm - bpm * 2) < 6.0;
+        check (tempoOk, "tempo detected: " + juce::String (track.bpm, 1) + " bpm (want 120, or half/double)");
+        check (std::abs (track.tuningCents) < 10.0, "tuning near 0 cents: " + juce::String (track.tuningCents, 1));
+
+        auto correct = 0, total = 0;
+
+        for (int beat = 4; beat < bars * 4 - 1; ++beat)   // skip the first bar while things settle
+        {
+            const auto t = (beat + 0.5) * beatSeconds;
+            const auto& truth = progression[(beat / 4) % 4];
+            const auto index = track.chordIndexAt (t);
+            ++total;
+
+            if (index >= 0)
+            {
+                const auto& c = track.chords[(size_t) index];
+                const auto minor = c.quality == ChordTrack::minor || c.quality == ChordTrack::minor7;
+                correct += (c.root == truth.root && minor == truth.minor) ? 1 : 0;
+            }
+        }
+
+        check (correct >= total * 9 / 10, "chords correct on " + juce::String (correct) + " of " + juce::String (total) + " beats");
+
+        juce::StringArray names;
+
+        for (const auto& c : track.chords)
+            names.add (track.chordName (c));
+
+        std::cout << "        detected: " << names.joinIntoString (" ").substring (0, 120) << std::endl;
+
+        auto downbeatsOk = 0, downbeatsSeen = 0;
+
+        for (size_t i = 0; i < track.beats.size(); ++i)
+        {
+            if (track.beats[i] < 2.0 || ! track.isDownbeat ((int) i))
+                continue;
+
+            ++downbeatsSeen;
+            const auto barPosition = std::fmod (track.beats[i], beatSeconds * 4);
+            downbeatsOk += (barPosition < 0.1 || barPosition > beatSeconds * 4 - 0.1) ? 1 : 0;
+        }
+
+        check (downbeatsSeen > 0 && downbeatsOk >= downbeatsSeen * 9 / 10,
+               "downbeats on bar starts: " + juce::String (downbeatsOk) + " of " + juce::String (downbeatsSeen));
+
+        ChordTrack::Chord bFlat { 0.0, 1.0, 10, ChordTrack::major, 0, 4 };
+        ChordTrack spelling;
+        spelling.keyRoot = 5;   // F major: flats
+        check (spelling.chordName (bFlat) == "Bb" && spelling.chordName (bFlat, 2) == "C", "names follow key and transpose: "
+               + spelling.chordName (bFlat) + ", " + spelling.chordName (bFlat, 2));
+        spelling.keyRoot = 4;   // E major: sharps
+        check (spelling.chordName (bFlat) == "A#", "sharp spelling in E major: " + spelling.chordName (bFlat));
+    }
 }
 
 int main()
@@ -335,6 +429,7 @@ int main()
     testPlayer();
     testFileLoading();
     testMetronome();
+    testChordAnalysis();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

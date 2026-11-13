@@ -50,6 +50,8 @@ target_sources(PracticeVibes PRIVATE
     Source/Main.cpp
     Source/AppEngine.cpp
     Source/AppLog.cpp
+    Source/ChordAnalyzer.cpp
+    Source/ChordView.cpp
     Source/MainComponent.cpp
     Source/MetronomeProcessor.cpp
     Source/MidiMonitor.cpp
@@ -79,6 +81,7 @@ endif()
 target_link_libraries(PracticeVibes
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_dsp
         signalsmith-stretch
     PUBLIC
         juce::juce_recommended_config_flags
@@ -91,6 +94,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
 
     target_sources(PracticeVibesTests PRIVATE
         Tests/AudioTests.cpp
+        Source/ChordAnalyzer.cpp
         Source/MetronomeProcessor.cpp
         Source/PlayerProcessor.cpp)
 
@@ -102,7 +106,20 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     target_link_libraries(PracticeVibesTests
         PRIVATE
             juce::juce_audio_utils
+            juce::juce_dsp
             signalsmith-stretch
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags)
+
+    # Developer tool: prints the chord analysis of audio files.
+    juce_add_console_app(ChordTool PRODUCT_NAME "ChordTool")
+    target_sources(ChordTool PRIVATE Tools/ChordTool.cpp Source/ChordAnalyzer.cpp)
+    target_compile_definitions(ChordTool PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(ChordTool
+        PRIVATE
+            juce::juce_audio_utils
+            juce::juce_dsp
         PUBLIC
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)

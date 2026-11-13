@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "ChordView.h"
 #include "MetronomeProcessor.h"
 #include "PlayerProcessor.h"
 #include "WaveformView.h"
@@ -28,6 +29,7 @@ private:
     void togglePlay();
     void updateLoopButtons();
     void updateTrainerControls();
+    void startChordAnalysis (std::shared_ptr<const LoadedSong>);
 
     static juce::String formatTime (double seconds);
 
@@ -45,6 +47,11 @@ private:
                      setAButton { "Set A" }, setBButton { "Set B" }, loopButton { "Loop" }, clearLoopButton { "Clear loop" };
     double pendingLoopStart = -1.0;
     std::shared_ptr<const LoadedSong> shownSong;   // detects songs loaded from elsewhere (e.g. command line)
+
+    // Chords: analysed in the background whenever a song is loaded.
+    ChordView chordView;
+    juce::ThreadPool chordPool { 1 };
+    std::shared_ptr<std::atomic<bool>> chordCancel;
 
     juce::Slider speedSlider, pitchSlider, songVolumeSlider;
     juce::Label speedLabel, pitchLabel, songVolumeLabel, hintLabel;

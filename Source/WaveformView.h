@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "ChordAnalyzer.h"
 #include "PlayerProcessor.h"
 
 namespace pv
@@ -31,6 +32,10 @@ public:
     void zoomToRange (double startSeconds, double endSeconds);
     bool isZoomed() const;
 
+    /** Chord names along the top of the waveform (nullptr hides them), transposed by `semitones`. */
+    void setChords (std::shared_ptr<const ChordTrack>);
+    void setChordTranspose (int semitones);
+
     std::function<void (double seconds)> onSeek;
     std::function<void (double startSeconds, double endSeconds)> onLoopSelected;   // new loop, enable it
     std::function<void (double startSeconds, double endSeconds)> onLoopEdited;     // edge moved
@@ -54,11 +59,14 @@ private:
 
     void paintWaveform (juce::Graphics&, juce::Rectangle<int> area);
     void paintTimeRuler (juce::Graphics&, juce::Rectangle<int> area);
+    void paintChordLane (juce::Graphics&, juce::Rectangle<int> area);
     void paintOverview (juce::Graphics&, juce::Rectangle<int> area);
     void startPinch();
 
     PlayerProcessor& player;
     std::shared_ptr<const LoadedSong> song;
+    std::shared_ptr<const ChordTrack> chords;
+    int chordTranspose = 0;
 
     juce::Rectangle<int> mainArea, overviewArea;
     double viewStart = 0.0, viewLength = 1.0;
