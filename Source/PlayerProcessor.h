@@ -13,9 +13,22 @@ struct LoadedSong
     juce::AudioBuffer<float> audio;     // always 2 channels
     double sampleRate = 44100.0;
     juce::String name;
-    std::vector<float> peaks;           // waveform overview, values 0..1
+
+    /** Waveform cache: min/max of the mono mix per bucket, at several resolutions
+        (finest first, each level 4x coarser), so any zoom level draws quickly and sharply.
+    */
+    struct PeakLevel
+    {
+        int samplesPerBucket = 0;
+        std::vector<float> mins, maxs;
+    };
+
+    std::vector<PeakLevel> peakLevels;
 
     double getLengthSeconds() const     { return audio.getNumSamples() / sampleRate; }
+
+    /** Builds peakLevels from the audio. */
+    void buildPeaks();
 };
 
 /** Plays a song with independent speed and pitch (Signalsmith Stretch), and A-B looping.

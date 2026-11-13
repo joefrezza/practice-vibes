@@ -216,8 +216,20 @@ namespace
             check (song->audio.getNumChannels() == 2, "mono file is played as stereo");
             check (std::abs (song->audio.getSample (1, 1000) - song->audio.getSample (0, 1000)) < 1.0e-6, "both channels identical");
 
-            const auto maxPeak = *std::max_element (song->peaks.begin(), song->peaks.end());
-            check (maxPeak > 0.4f && maxPeak < 0.6f, "waveform overview computed: max " + juce::String (maxPeak, 2));
+            check (! song->peakLevels.empty(), "waveform cache built: " + juce::String ((int) song->peakLevels.size()) + " level(s)");
+
+            if (! song->peakLevels.empty())
+            {
+                const auto& finest = song->peakLevels.front();
+                const auto maxPeak = *std::max_element (finest.maxs.begin(), finest.maxs.end());
+                const auto minPeak = *std::min_element (finest.mins.begin(), finest.mins.end());
+                check (maxPeak > 0.45f && maxPeak < 0.55f && minPeak < -0.45f && minPeak > -0.55f,
+                       "waveform cache min/max: " + juce::String (minPeak, 2) + " / " + juce::String (maxPeak, 2));
+
+                const auto& coarsest = song->peakLevels.back();
+                check (std::abs (*std::max_element (coarsest.maxs.begin(), coarsest.maxs.end()) - maxPeak) < 1.0e-6f,
+                       "coarse levels keep the same peak");
+            }
         }
         else
         {

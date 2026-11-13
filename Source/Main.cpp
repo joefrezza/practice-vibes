@@ -44,7 +44,7 @@ public:
     const juce::String getApplicationVersion() override { return JUCE_APPLICATION_VERSION_STRING; }
     bool moreThanOneInstanceAllowed() override          { return false; }
 
-    void initialise (const juce::String&) override
+    void initialise (const juce::String& commandLine) override
     {
         log = std::make_unique<AppLog>();
 
@@ -56,6 +56,16 @@ public:
         engine = std::make_unique<AppEngine>();
         mainWindow = std::make_unique<MainWindow> (getApplicationName(), *engine, *log);
         engine->start();
+
+       #if ! (JUCE_IOS || JUCE_ANDROID)
+        // Desktop: a song file passed on the command line is opened in the player.
+        const auto argument = commandLine.trim().unquoted();
+
+        if (argument.isNotEmpty() && juce::File::isAbsolutePath (argument) && juce::File (argument).existsAsFile())
+            engine->player->loadAsync (juce::URL (juce::File (argument)), {});
+       #else
+        juce::ignoreUnused (commandLine);
+       #endif
     }
 
     void shutdown() override

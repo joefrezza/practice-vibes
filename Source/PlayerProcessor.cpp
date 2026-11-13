@@ -5,8 +5,6 @@ namespace pv
 
 namespace
 {
-    constexpr int numWaveformPeaks = 4000;
-
     /** Gives the stretcher `reader[channel][i]` access to the song, starting at `start`,
         wrapping around the loop region and returning silence past the end.
     */
@@ -80,24 +78,76 @@ namespace
         if (reader->numChannels == 1)
             song->audio.copyFrom (1, 0, song->audio, 0, 0, length);
 
-        // Waveform overview: peak of the mono mix per bucket.
-        song->peaks.resize (numWaveformPeaks);
-        const auto* left = song->audio.getReadPointer (0);
-        const auto* right = song->audio.getReadPointer (1);
-
-        for (int bucket = 0; bucket < numWaveformPeaks; ++bucket)
-        {
-            const auto begin = (int) ((juce::int64) bucket * length / numWaveformPeaks);
-            const auto end = juce::jmax (begin + 1, (int) ((juce::int64) (bucket + 1) * length / numWaveformPeaks));
-            float peak = 0.0f;
-
-            for (int i = begin; i < end && i < length; ++i)
-                peak = juce::jmax (peak, std::abs (0.5f * (left[i] + right[i])));
-
-            song->peaks[(size_t) bucket] = juce::jmin (1.0f, peak);
-        }
+        song->buildPeaks();
 
         return song;
+    }
+}
+
+//==============================================================================
+void LoadedSong::buildPeaks()
+{
+    peakLevels.clear();
+
+    const auto length = audio.getNumSamples();
+
+    if (length <= 0)
+        return;
+
+    // Finest level straight from the audio.
+    PeakLevel level;
+    level.samplesPerBucket = 256;
+    const auto numBuckets = (length + level.samplesPerBucket - 1) / level.samplesPerBucket;
+    level.mins.resize ((size_t) numBuckets);
+    level.maxs.resize ((size_t) numBuckets);
+
+    const auto* left = audio.getReadPointer (0);
+    const auto* right = audio.getReadPointer (1);
+
+    for (int bucket = 0; bucket < numBuckets; ++bucket)
+    {
+        const auto begin = bucket * level.samplesPerBucket;
+        const auto end = juce::jmin (length, begin + level.samplesPerBucket);
+        auto lo = 0.0f, hi = 0.0f;
+
+        for (int i = begin; i < end; ++i)
+        {
+            const auto mono = 0.5f * (left[i] + right[i]);
+            lo = juce::jmin (lo, mono);
+            hi = juce::jmax (hi, mono);
+        }
+
+        level.mins[(size_t) bucket] = lo;
+        level.maxs[(size_t) bucket] = hi;
+    }
+
+    peakLevels.push_back (std::move (level));
+
+    // Each further level combines 4 buckets of the previous one.
+    while (peakLevels.back().mins.size() > 512)
+    {
+        const auto& previous = peakLevels.back();
+        PeakLevel coarser;
+        coarser.samplesPerBucket = previous.samplesPerBucket * 4;
+        const auto count = (previous.mins.size() + 3) / 4;
+        coarser.mins.resize (count);
+        coarser.maxs.resize (count);
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            auto lo = 0.0f, hi = 0.0f;
+
+            for (size_t j = i * 4; j < juce::jmin (previous.mins.size(), i * 4 + 4); ++j)
+            {
+                lo = juce::jmin (lo, previous.mins[j]);
+                hi = juce::jmax (hi, previous.maxs[j]);
+            }
+
+            coarser.mins[i] = lo;
+            coarser.maxs[i] = hi;
+        }
+
+        peakLevels.push_back (std::move (coarser));
     }
 }
 

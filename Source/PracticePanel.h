@@ -40,9 +40,11 @@ private:
     juce::Label songHeader, songLabel, timeLabel;
     juce::TextButton openButton { "Open audio file" };
     WaveformView waveform;
+    juce::TextButton zoomOutButton { "-" }, zoomInButton { "+" }, fitButton { "Fit" }, zoomLoopButton { "Zoom to loop" };
     juce::TextButton rewindButton { "|<" }, playButton { "Play" }, stopButton { "Stop" },
                      setAButton { "Set A" }, setBButton { "Set B" }, loopButton { "Loop" }, clearLoopButton { "Clear loop" };
     double pendingLoopStart = -1.0;
+    std::shared_ptr<const LoadedSong> shownSong;   // detects songs loaded from elsewhere (e.g. command line)
 
     juce::Slider speedSlider, pitchSlider, songVolumeSlider;
     juce::Label speedLabel, pitchLabel, songVolumeLabel, hintLabel;

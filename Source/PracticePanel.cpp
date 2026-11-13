@@ -97,6 +97,7 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
     for (auto* c : std::initializer_list<juce::Component*> { &songHeader, &songLabel, &timeLabel, &openButton, &waveform,
                                                              &rewindButton, &playButton, &stopButton, &setAButton, &setBButton,
                                                              &loopButton, &clearLoopButton, &speedSlider, &pitchSlider,
+                                                             &zoomOutButton, &zoomInButton, &fitButton, &zoomLoopButton,
                                                              &songVolumeSlider, &speedLabel, &pitchLabel, &songVolumeLabel, &hintLabel })
         addAndMakeVisible (c);
 
@@ -106,6 +107,20 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
     stopButton.onClick = [this] { player.stop(); };
 
     waveform.onSeek = [this] (double seconds) { player.seekToSeconds (seconds); };
+    waveform.onLoopEdited = [this] (double start, double end)
+    {
+        player.setLoopSeconds (start, end);
+        updateLoopButtons();
+    };
+
+    zoomOutButton.onClick = [this] { waveform.zoomBy (0.5); };
+    zoomInButton.onClick = [this] { waveform.zoomBy (2.0); };
+    fitButton.onClick = [this] { waveform.zoomToFit(); };
+    zoomLoopButton.onClick = [this]
+    {
+        if (player.hasLoop())
+            waveform.zoomToRange (player.getLoopStartSeconds(), player.getLoopEndSeconds());
+    };
     waveform.onLoopSelected = [this] (double start, double end)
     {
         player.setLoopSeconds (start, end);
@@ -161,7 +176,7 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
     styleHorizontal (songVolumeSlider, -40.0, 6.0, 0.5, 0.0, " dB");
     songVolumeSlider.onValueChange = [this] { player.gain = juce::Decibels::decibelsToGain ((float) songVolumeSlider.getValue(), -40.0f); };
 
-    styleLabel (hintLabel, "Tap the waveform to jump, drag across it to loop a section. Double-click a slider to reset it.", 0.45f);
+    styleLabel (hintLabel, "Tap the waveform to jump, drag to loop, drag a loop edge to adjust it. Zoom: pinch, or Ctrl+wheel. Double-click a slider to reset it.", 0.45f);
     hintLabel.setMinimumHorizontalScale (0.5f);
 
     updateLoopButtons();
@@ -284,12 +299,7 @@ void PracticePanel::openFile()
                 return;
             }
 
-            if (auto song = safeThis->player.getSong())
-                safeThis->songLabel.setText (song->name, juce::dontSendNotification);
-
-            safeThis->pendingLoopStart = -1.0;
-            safeThis->waveform.songChanged();
-            safeThis->updateLoopButtons();
+            // The timer notices the new song and updates the waveform and labels.
         });
     });
 }
@@ -311,6 +321,7 @@ void PracticePanel::updateLoopButtons()
                                                : juce::String ("Loop"));
     loopButton.setColour (juce::TextButton::buttonOnColourId, theme::accent);
     clearLoopButton.setEnabled (player.hasLoop());
+    zoomLoopButton.setEnabled (player.hasLoop());
 
     if (pendingLoopStart < 0.0)
         setAButton.setButtonText ("Set A");
@@ -340,9 +351,18 @@ bool PracticePanel::keyPressed (const juce::KeyPress& key)
 
 void PracticePanel::timerCallback()
 {
+    if (auto song = player.getSong(); song != shownSong)
+    {
+        shownSong = song;
+        songLabel.setText (song != nullptr ? song->name : juce::String ("No song loaded"), juce::dontSendNotification);
+        pendingLoopStart = -1.0;
+        waveform.songChanged();
+        updateLoopButtons();
+    }
+
     const auto hasSong = player.hasSong();
 
-    for (auto* b : { &rewindButton, &playButton, &stopButton, &setAButton, &setBButton })
+    for (auto* b : { &rewindButton, &playButton, &stopButton, &setAButton, &setBButton, &zoomOutButton, &zoomInButton, &fitButton })
         b->setEnabled (hasSong);
 
     playButton.setButtonText (player.isPlaying() ? "Pause" : "Play");
@@ -350,7 +370,7 @@ void PracticePanel::timerCallback()
                        juce::dontSendNotification);
 
     if (hasSong)
-        waveform.repaint();
+        waveform.refresh();
 
     metronomeButton.setButtonText (metronome.isRunning() ? "Stop metronome" : "Start metronome");
     bpmDisplay.setText (juce::String (juce::roundToInt (metronome.isRunning() ? metronome.getCurrentBpm()
@@ -374,10 +394,15 @@ void PracticePanel::resized()
     songHeader.setBounds (top.removeFromLeft (70));
     openButton.setBounds (top.removeFromLeft (170).reduced (3));
     timeLabel.setBounds (top.removeFromRight (190));
+    top.removeFromRight (12);
+    zoomLoopButton.setBounds (top.removeFromRight (130).reduced (3));
+    fitButton.setBounds (top.removeFromRight (60).reduced (3));
+    zoomInButton.setBounds (top.removeFromRight (48).reduced (3));
+    zoomOutButton.setBounds (top.removeFromRight (48).reduced (3));
     songLabel.setBounds (top.reduced (8, 0));
 
-    // Waveform
-    waveform.setBounds (area.removeFromTop (juce::jmax (120, area.getHeight() * 30 / 100)).reduced (0, 4));
+    // Waveform (includes the overview strip at its bottom)
+    waveform.setBounds (area.removeFromTop (juce::jmax (170, area.getHeight() * 38 / 100)).reduced (0, 4));
 
     // Transport
     auto transport = area.removeFromTop (52).reduced (0, 4);
