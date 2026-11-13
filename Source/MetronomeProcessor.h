@@ -1,6 +1,8 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "ChordAnalyzer.h"
+#include "PlayerProcessor.h"
 
 namespace pv
 {
@@ -39,6 +41,13 @@ public:
     std::atomic<int> trainerUnit { (int) IntervalUnit::minutes };
     std::atomic<double> trainerMaxBpm { 160.0 };
 
+    /** "Follow song": while the player plays, click on the song's detected beats (and bars)
+        instead of a fixed tempo. Needs setPlayer() and a beat grid. */
+    std::atomic<bool> followSong { false };
+    void setPlayer (const PlayerProcessor* p)                   { player = p; }
+    void setSongGrid (std::shared_ptr<const ChordTrack>);       // message thread; nullptr clears
+    bool isFollowing() const noexcept                           { return following.load(); }
+
     /** Starts from startBpm, on beat 1. */
     void start();
     void stop();
@@ -50,6 +59,7 @@ public:
     // Status (audio -> UI)
     double getCurrentBpm() const noexcept       { return currentBpm.load(); }
     int getCurrentBeat() const noexcept         { return currentBeat.load(); }   // 0-based, -1 when stopped
+    int getCurrentBeatsPerBar() const noexcept  { return currentBeatsPerBar.load(); }
 
     //==============================================================================
     const juce::String getName() const override { return "Metronome"; }
@@ -87,7 +97,9 @@ private:
         bool active = false;
     };
 
-    void onTick (int beatInBar, int tickInBeat);
+    void onTick (int beatInBar, int tickInBeat, int barLength, bool allowTrainer);
+    void renderFollowingTicks (int numSamples, const ChordTrack&, std::vector<int>& tickOffsets);
+    double followTickTime (const ChordTrack&, int beat, int tick, int ticks) const;
     void trigger (double frequency, double frequencyEnd, float toneLevel, double toneDecaySeconds,
                   float noiseLevel = 0.0f, double noiseDecaySeconds = 0.01, float highPass = 0.0f);
     float renderVoices();
@@ -96,7 +108,19 @@ private:
 
     std::atomic<bool> running { false }, startRequested { false }, resetTempoRequested { false };
     std::atomic<double> currentBpm { 100.0 };
-    std::atomic<int> currentBeat { -1 };
+    std::atomic<int> currentBeat { -1 }, currentBeatsPerBar { 4 };
+    std::atomic<bool> following { false };
+
+    const PlayerProcessor* player = nullptr;
+    juce::SpinLock gridLock;
+    std::shared_ptr<const ChordTrack> songGrid;
+
+    // Follow-mode audio-thread state
+    juce::int64 samplesRendered = 0;
+    bool followLocked = false;
+    double expectedSongTime = 0.0;
+    int followBeat = 0, followTick = 0;     // the NEXT tick to play
+    std::vector<std::pair<int, std::array<int, 3>>> pendingTicks;   // (sample offset, {beatInBar, tick, barLength})
 
     // Audio-thread state
     double samplesUntilNextTick = 0.0;

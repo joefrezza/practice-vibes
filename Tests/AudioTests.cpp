@@ -535,6 +535,132 @@ namespace
                    "meter change 7/4 -> 4/4 -> 7/4: detected " + first + " -> " + second + " -> " + third);
         }
     }
+
+    /** Metronome following the song's beat grid through the player, at two speeds,
+        in both processing orders, and across a loop jump. */
+    void testFollowSong()
+    {
+        std::cout << "Metronome follows song" << std::endl;
+        constexpr double rate = 48000.0;
+        constexpr int blockSize = 512;
+
+        auto grid = std::make_shared<ChordTrack>();
+
+        for (int i = 0; i < 40; ++i)
+        {
+            grid->beats.push_back (0.5 * i);
+            grid->beatPositions.push_back (i % 4);
+            grid->beatMeters.push_back (4);
+        }
+
+        struct Case { double speed; bool playerFirst; bool loop; const char* name; };
+
+        for (auto c : { Case { 1.0, true, false, "1x, player first" }, Case { 1.0, false, false, "1x, metronome first" },
+                        Case { 0.75, true, false, "0.75x" }, Case { 1.0, true, true, "loop 1-3 s" } })
+        {
+            PlayerProcessor player;
+            MetronomeProcessor metronome;
+            player.prepareToPlay (rate, blockSize);
+            metronome.prepareToPlay (rate, blockSize);
+            player.setSong (makeSine (44100.0, 220.0, 12.0));
+            player.setSpeed (c.speed);
+
+            if (c.loop)
+            {
+                player.setLoopSeconds (1.0, 3.0);
+                player.setLoopEnabled (true);
+            }
+
+            metronome.setPlayer (&player);
+            metronome.setSongGrid (grid);
+            metronome.followSong = true;
+            metronome.sound = (int) MetronomeProcessor::Sound::beep;
+            metronome.start();
+            player.play();
+
+            juce::AudioBuffer<float> playerBlock (2, blockSize), clickBlock (2, blockSize);
+            juce::MidiBuffer midi;
+            std::vector<float> clicks;
+            std::vector<std::pair<juce::int64, double>> heard;   // (sample index at block end, heard song time)
+            const auto totalBlocks = (int) (7.0 * rate / blockSize);
+
+            for (int b = 0; b < totalBlocks; ++b)
+            {
+                if (c.playerFirst)
+                {
+                    player.processBlock (playerBlock, midi);
+                    metronome.processBlock (clickBlock, midi);
+                }
+                else
+                {
+                    metronome.processBlock (clickBlock, midi);
+                    player.processBlock (playerBlock, midi);
+                }
+
+                heard.push_back ({ (juce::int64) (b + 1) * blockSize, player.getPositionSeconds() });
+
+                for (int i = 0; i < blockSize; ++i)
+                    clicks.push_back (clickBlock.getSample (0, i));
+            }
+
+            // Click onsets, and the song time heard at each.
+            std::vector<double> songTimes;
+            std::vector<float> peaks;
+            auto quiet = 1 << 30;
+
+            for (size_t i = 0; i < clicks.size(); ++i)
+            {
+                if (std::abs (clicks[i]) > 0.05f)
+                {
+                    if (quiet > (int) (0.05 * rate))
+                    {
+                        const auto block = i / blockSize;
+                        const auto t = heard[block].second - (double) (heard[block].first - (juce::int64) i) * c.speed / rate;
+                        songTimes.push_back (t);
+                        auto peak = 0.0f;
+
+                        for (size_t j = i; j < juce::jmin (clicks.size(), i + 200); ++j)
+                            peak = juce::jmax (peak, std::abs (clicks[j]));
+
+                        peaks.push_back (peak);
+                    }
+
+                    quiet = 0;
+                }
+                else
+                {
+                    ++quiet;
+                }
+            }
+
+            // Skip the first second (the stretcher fills up), then every click must sit on a beat.
+            auto onBeat = 0, considered = 0, accentsOk = 0, loopStarts = 0;
+
+            for (size_t k = 0; k < songTimes.size(); ++k)
+            {
+                if (songTimes[k] < 0.9 && ! c.loop)
+                    continue;
+
+                ++considered;
+                const auto nearest = std::round (songTimes[k] / 0.5) * 0.5;
+                onBeat += std::abs (songTimes[k] - nearest) < 0.015 ? 1 : 0;
+
+                const auto isDownbeat = ((int) std::lround (nearest / 0.5)) % 4 == 0;
+                accentsOk += (isDownbeat == (peaks[k] > 0.55f)) ? 1 : 0;
+                loopStarts += c.loop && std::abs (songTimes[k] - 1.0) < 0.03 ? 1 : 0;
+            }
+
+            check (considered > 4 && onBeat == considered && accentsOk == considered,
+                   juce::String (c.name) + ": " + juce::String (onBeat) + "/" + juce::String (considered) + " clicks on beats, "
+                       + juce::String (accentsOk) + " with the right accent");
+
+            if (c.loop)
+                check (loopStarts >= 2, "loop restart clicks on its first beat: " + juce::String (loopStarts) + " times");
+
+            if (c.speed != 1.0)
+                check (std::abs (metronome.getCurrentBpm() - 120.0 * c.speed) < 1.0, "shown tempo follows speed: " + juce::String (metronome.getCurrentBpm(), 1));
+        }
+    }
 }
 
 int main()
@@ -547,6 +673,7 @@ int main()
     testChordAnalysis();
     testSlashChords();
     testMeters();
+    testFollowSong();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

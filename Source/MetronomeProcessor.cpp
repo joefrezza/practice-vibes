@@ -28,9 +28,27 @@ void MetronomeProcessor::stop()
     currentBeat = -1;
 }
 
-void MetronomeProcessor::prepareToPlay (double newSampleRate, int)
+void MetronomeProcessor::prepareToPlay (double newSampleRate, int maximumBlockSize)
 {
     sampleRate = newSampleRate > 0 ? newSampleRate : 48000.0;
+    samplesRendered = 0;
+    followLocked = false;
+    pendingTicks.reserve ((size_t) juce::jmax (64, maximumBlockSize));
+}
+
+void MetronomeProcessor::setSongGrid (std::shared_ptr<const ChordTrack> grid)
+{
+    const juce::SpinLock::ScopedLockType lock (gridLock);
+    songGrid = std::move (grid);
+}
+
+double MetronomeProcessor::followTickTime (const ChordTrack& grid, int beat, int tick, int ticks) const
+{
+    const auto& b = grid.beats;
+    const auto n = (int) b.size();
+    const auto start = beat < n ? b[(size_t) beat] : b[(size_t) n - 1] + (beat - n + 1) * (b[(size_t) n - 1] - b[(size_t) n - 2]);
+    const auto next = beat + 1 < n ? b[(size_t) beat + 1] : start + (b[(size_t) n - 1] - b[(size_t) n - 2]);
+    return start + (next - start) * tick / ticks;
 }
 
 //==============================================================================
@@ -91,10 +109,10 @@ float MetronomeProcessor::renderVoices()
     return out;
 }
 
-void MetronomeProcessor::onTick (int beatInBar, int tickInBeat)
+void MetronomeProcessor::onTick (int beatInBar, int tickInBeat, int barLength, bool allowTrainer)
 {
     const auto isBeat = tickInBeat == 0;
-    const auto isDownbeat = isBeat && beatInBar == 0 && accentFirstBeat.load() && beatsPerBar.load() > 1;
+    const auto isDownbeat = isBeat && beatInBar == 0 && accentFirstBeat.load() && barLength > 1;
     const auto subLevel = subdivisionLevel.load();
 
     switch ((Sound) sound.load())
@@ -133,9 +151,10 @@ void MetronomeProcessor::onTick (int beatInBar, int tickInBeat)
         return;
 
     currentBeat = beatInBar;
+    currentBeatsPerBar = barLength;
 
     // Speed trainer: tempo steps happen on bar lines.
-    if (beatInBar == 0 && trainerEnabled.load())
+    if (allowTrainer && beatInBar == 0 && trainerEnabled.load())
     {
         const auto interval = juce::jmax (0.01, trainerInterval.load());
         const auto due = trainerUnit.load() == (int) IntervalUnit::bars
@@ -186,9 +205,42 @@ void MetronomeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     const auto targetGain = gain.load();
     const auto isRunning = running.load();
 
+    // Follow mode: ticks come from the song's beat grid, placed where the player is.
+    std::shared_ptr<const ChordTrack> grid;
+
+    if (followSong.load() && player != nullptr)
+    {
+        const juce::SpinLock::ScopedTryLockType lock (gridLock);
+
+        if (lock.isLocked())
+            grid = songGrid;
+    }
+
+    const auto followMode = isRunning && grid != nullptr && grid->beats.size() > 1;
+    following = followMode;
+    pendingTicks.clear();
+
+    if (followMode)
+    {
+        std::vector<int> unused;
+        renderFollowingTicks (numSamples, *grid, unused);
+    }
+    else
+    {
+        followLocked = false;
+    }
+
+    size_t nextPending = 0;
+
     for (int i = 0; i < numSamples; ++i)
     {
-        if (isRunning && samplesUntilNextTick <= 0.0)
+        while (nextPending < pendingTicks.size() && pendingTicks[nextPending].first <= i)
+        {
+            const auto& t = pendingTicks[nextPending++].second;
+            onTick (t[0], t[1], t[2], false);
+        }
+
+        if (isRunning && ! followMode && samplesUntilNextTick <= 0.0)
         {
             const auto barLength = juce::jmax (1, beatsPerBar.load());
             const auto ticks = ticksPerBeat ((Subdivision) subdivision.load());
@@ -205,12 +257,12 @@ void MetronomeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
             if (tickIndex == 0 && beatIndex == 0)
                 ++barsSinceStep;
 
-            onTick (beatIndex, tickIndex);
+            onTick (beatIndex, tickIndex, barLength, true);
             ++tickIndex;
             samplesUntilNextTick += sampleRate * 60.0 / bpm / ticks;
         }
 
-        if (isRunning)
+        if (isRunning && ! followMode)
             samplesUntilNextTick -= 1.0;
 
         // Voices keep ringing briefly after stop, so stopping never clicks.
@@ -223,9 +275,77 @@ void MetronomeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     }
 
     lastGain = targetGain;
+    samplesRendered += numSamples;
 
-    if (isRunning)
+    if (isRunning && ! followMode)
         secondsSinceStep += numSamples / sampleRate;
+}
+
+void MetronomeProcessor::renderFollowingTicks (int numSamples, const ChordTrack& grid, std::vector<int>&)
+{
+    PlayerProcessor::Clock clock;
+
+    if (! player->getClock (clock) || ! clock.playing)
+    {
+        followLocked = false;
+        return;
+    }
+
+    // Song time at the first sample of this block. The player's clock may be from the end of
+    // this very block or of the previous one, depending on processing order; the sample counts tell.
+    const auto rate = clock.speed / sampleRate;    // song seconds per output sample
+    const auto songTime = clock.heardSeconds - (double) (clock.samplesRendered - samplesRendered) * rate;
+    const auto ticks = ticksPerBeat ((Subdivision) subdivision.load());
+    const auto& beats = grid.beats;
+    const auto numBeats = (int) beats.size();
+
+    // After a seek, a loop jump or a pause, find the next tick again. A tick up to 30 ms
+    // in the past still plays, so the first beat of a loop isn't skipped.
+    if (! followLocked || std::abs (songTime - expectedSongTime) > 0.03)
+    {
+        const auto target = songTime - 0.03;
+        followBeat = juce::jmax (0, (int) std::distance (beats.begin(), std::upper_bound (beats.begin(), beats.end(), target)) - 1);
+        followTick = 0;
+
+        while (followTickTime (grid, followBeat, followTick, ticks) < target)
+        {
+            if (++followTick >= ticks)
+            {
+                followTick = 0;
+                ++followBeat;
+            }
+        }
+
+        followLocked = true;
+    }
+
+    expectedSongTime = songTime + numSamples * rate;
+    followTick = juce::jmin (followTick, ticks - 1);    // the subdivision may have changed
+
+    for (;;)
+    {
+        const auto t = followTickTime (grid, followBeat, followTick, ticks);
+
+        if (t >= expectedSongTime)
+            break;
+
+        const auto offset = juce::jlimit (0, numSamples - 1, (int) std::floor ((t - songTime) / rate));
+        const auto inRange = followBeat < numBeats;
+        const auto position = inRange && followBeat < (int) grid.beatPositions.size() ? grid.beatPositions[(size_t) followBeat] : -1;
+        const auto barLength = inRange && followBeat < (int) grid.beatMeters.size() ? grid.beatMeters[(size_t) followBeat] : grid.beatsPerBar;
+
+        if (inRange)
+            pendingTicks.push_back ({ offset, { juce::jmax (0, position), followTick, position < 0 ? 1 : barLength } });
+
+        if (followTick == 0 && inRange && followBeat + 1 < numBeats)
+            currentBpm = 60.0 / (beats[(size_t) followBeat + 1] - beats[(size_t) followBeat]) * clock.speed;
+
+        if (++followTick >= ticks)
+        {
+            followTick = 0;
+            ++followBeat;
+        }
+    }
 }
 
 } // namespace pv

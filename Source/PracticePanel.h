@@ -69,6 +69,8 @@ private:
     juce::Slider subLevelSlider;
 
     juce::ToggleButton trainerToggle { "Speed trainer" };
+    juce::ToggleButton followToggle { "Follow song beats" };
+    void updateFollowControls();
     juce::Slider stepSlider, intervalSlider, maxBpmSlider;
     juce::ComboBox unitBox;
     juce::Label stepLabel, everyLabel, maxLabel;

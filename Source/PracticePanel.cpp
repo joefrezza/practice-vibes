@@ -13,7 +13,7 @@ public:
     void update()
     {
         const auto beat = metronome.getCurrentBeat();
-        const auto beats = metronome.beatsPerBar.load();
+        const auto beats = metronome.isRunning() && beat >= 0 ? metronome.getCurrentBeatsPerBar() : metronome.beatsPerBar.load();
 
         if (beat != lastBeat || beats != lastBeats)
         {
@@ -195,7 +195,7 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
 
     for (auto* c : std::initializer_list<juce::Component*> { &metronomeHeader, &bpmDisplay, &metronomeButton, beatIndicator.get(),
                                                              &bpmSlider, &clickVolumeSlider, &bpmLabel, &beatsLabel,
-                                                             &clickVolumeLabel, &beatsBox, &trainerToggle, &stepSlider,
+                                                             &clickVolumeLabel, &beatsBox, &trainerToggle, &followToggle, &stepSlider,
                                                              &subdivisionBox, &soundBox, &subdivisionLabel, &soundLabel,
                                                              &subLevelLabel, &subLevelSlider,
                                                              &intervalSlider, &maxBpmSlider, &unitBox, &stepLabel,
@@ -260,6 +260,14 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
     styleHorizontal (clickVolumeSlider, -40.0, 6.0, 0.5, juce::Decibels::gainToDecibels (metronome.gain.load()), " dB");
     clickVolumeSlider.onValueChange = [this] { metronome.gain = juce::Decibels::decibelsToGain ((float) clickVolumeSlider.getValue(), -40.0f); };
 
+    followToggle.setTooltip ("While the song plays, the metronome clicks on the song's detected beats and bars.");
+    followToggle.setToggleState (metronome.followSong.load(), juce::dontSendNotification);
+    followToggle.onClick = [this]
+    {
+        metronome.followSong = followToggle.getToggleState();
+        updateFollowControls();
+    };
+
     trainerToggle.setToggleState (metronome.trainerEnabled.load(), juce::dontSendNotification);
     trainerToggle.onClick = [this]
     {
@@ -287,6 +295,7 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
     maxBpmSlider.onValueChange = [this] { metronome.trainerMaxBpm = maxBpmSlider.getValue(); };
 
     updateTrainerControls();
+    updateFollowControls();
     startTimerHz (30);
 }
 
@@ -306,6 +315,9 @@ void PracticePanel::startChordAnalysis (std::shared_ptr<const LoadedSong> song)
         *chordCancel = true;
 
     waveform.setChords (nullptr);
+    metronome.setSongGrid (nullptr);
+    followToggle.setEnabled (false);
+    updateFollowControls();
     chordView.setTrack (nullptr, song != nullptr ? "Analysing chords..." : "");
 
     if (song == nullptr)
@@ -343,6 +355,9 @@ void PracticePanel::startChordAnalysis (std::shared_ptr<const LoadedSong> song)
             const auto found = ! track->chords.empty();
             safeThis->chordView.setTrack (found ? track : nullptr, found ? juce::String() : juce::String ("No chords found in this song."));
             safeThis->waveform.setChords (found ? track : nullptr);
+            safeThis->metronome.setSongGrid (found ? track : nullptr);
+            safeThis->followToggle.setEnabled (found);
+            safeThis->updateFollowControls();
         });
     });
 }
@@ -424,9 +439,20 @@ void PracticePanel::updateSnapButton()
     snapButton.setTooltip ("Loop edges snap to the detected bars or beats. Tap to change.");
 }
 
+void PracticePanel::updateFollowControls()
+{
+    // While following the song, tempo and bar length come from the song.
+    const auto following = followToggle.getToggleState() && followToggle.isEnabled();
+
+    for (auto* c : std::initializer_list<juce::Component*> { &bpmSlider, &bpmLabel, &beatsBox, &beatsLabel, &trainerToggle })
+        c->setEnabled (! following);
+
+    updateTrainerControls();
+}
+
 void PracticePanel::updateTrainerControls()
 {
-    const auto on = trainerToggle.getToggleState();
+    const auto on = trainerToggle.getToggleState() && trainerToggle.isEnabled();
 
     for (auto* c : std::initializer_list<juce::Component*> { &stepSlider, &intervalSlider, &maxBpmSlider, &unitBox,
                                                              &stepLabel, &everyLabel, &maxLabel })
@@ -476,6 +502,7 @@ void PracticePanel::timerCallback()
     bpmDisplay.setText (juce::String (juce::roundToInt (metronome.isRunning() ? metronome.getCurrentBpm()
                                                                                : metronome.startBpm.load())) + " bpm",
                         juce::dontSendNotification);
+    bpmDisplay.setColour (juce::Label::textColourId, metronome.isFollowing() ? theme::accent.brighter (0.6f) : theme::highlight);
     beatIndicator->update();
 }
 
@@ -568,7 +595,11 @@ void PracticePanel::resized()
 
     sliderRow (right, subLevelLabel, subLevelSlider);
 
-    trainerToggle.setBounds (right.removeFromTop (36));
+    {
+        auto row = right.removeFromTop (36);
+        trainerToggle.setBounds (row.removeFromLeft (row.getWidth() / 2));
+        followToggle.setBounds (row);
+    }
 
     {
         auto row = right.removeFromTop (44);

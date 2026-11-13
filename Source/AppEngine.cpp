@@ -24,6 +24,9 @@ AppEngine::AppEngine()
     chain = std::make_unique<PluginChain> (deviceManager, formatManager);
     player = chain->addSource (std::make_unique<PlayerProcessor>());
     metronome = chain->addSource (std::make_unique<MetronomeProcessor>());
+
+    if (metronome != nullptr && player != nullptr)
+        metronome->setPlayer (player);
     catalogue = std::make_unique<PluginCatalogue> (formatManager);
     midi = std::make_unique<MidiMonitor> (deviceManager);
 }

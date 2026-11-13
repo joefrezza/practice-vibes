@@ -296,9 +296,21 @@ double PlayerProcessor::getLoopEndSeconds() const
 }
 
 //==============================================================================
+bool PlayerProcessor::getClock (Clock& out) const
+{
+    const juce::SpinLock::ScopedTryLockType lock (clockLock);
+
+    if (! lock.isLocked())
+        return false;
+
+    out = clock;
+    return true;
+}
+
 void PlayerProcessor::prepareToPlay (double sampleRate, int)
 {
     deviceSampleRate = sampleRate > 0 ? sampleRate : 48000.0;
+    samplesRendered = 0;
     stretch.presetDefault (2, (float) deviceSampleRate);
     lastTransposeFactor = 0.0;
 
@@ -308,6 +320,18 @@ void PlayerProcessor::prepareToPlay (double sampleRate, int)
 }
 
 void PlayerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    renderBlock (buffer);
+    samplesRendered += buffer.getNumSamples();
+
+    const juce::SpinLock::ScopedLockType lock (clockLock);
+    clock.samplesRendered = samplesRendered;
+    clock.heardSeconds = positionSeconds.load();
+    clock.speed = speed.load();
+    clock.playing = playing.load() && song != nullptr;
+}
+
+void PlayerProcessor::renderBlock (juce::AudioBuffer<float>& buffer)
 {
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();

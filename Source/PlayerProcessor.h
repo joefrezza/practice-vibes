@@ -80,6 +80,19 @@ public:
 
     std::atomic<float> gain { 1.0f };
 
+    /** Where the listener is in the song, tied to a running count of rendered samples,
+        so other processors in the same graph (the metronome) can line up with it. */
+    struct Clock
+    {
+        juce::int64 samplesRendered = 0;    // samples processed since prepareToPlay, at the end of the last block
+        double heardSeconds = 0.0;          // song position heard at that moment
+        double speed = 1.0;
+        bool playing = false;
+    };
+
+    /** Audio thread safe; returns false if the clock is being updated right now. */
+    bool getClock (Clock&) const;
+
     //==============================================================================
     const juce::String getName() const override         { return "Song player"; }
     void prepareToPlay (double sampleRate, int maximumBlockSize) override;
@@ -107,6 +120,11 @@ public:
 
 private:
     juce::int64 secondsToSamples (double seconds) const;
+    void renderBlock (juce::AudioBuffer<float>&);
+
+    mutable juce::SpinLock clockLock;
+    Clock clock;
+    juce::int64 samplesRendered = 0;
 
     juce::AudioFormatManager formatManager;
     juce::ThreadPool loaderPool { 1 };
