@@ -55,7 +55,9 @@ private:
     std::unique_ptr<BeatIndicator> beatIndicator;
     juce::Slider bpmSlider, clickVolumeSlider;
     juce::Label bpmLabel, beatsLabel, clickVolumeLabel;
-    juce::ComboBox beatsBox;
+    juce::ComboBox beatsBox, subdivisionBox, soundBox;
+    juce::Label subdivisionLabel, soundLabel, subLevelLabel;
+    juce::Slider subLevelSlider;
 
     juce::ToggleButton trainerToggle { "Speed trainer" };
     juce::Slider stepSlider, intervalSlider, maxBpmSlider;

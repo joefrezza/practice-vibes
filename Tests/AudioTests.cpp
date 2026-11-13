@@ -253,11 +253,62 @@ namespace
             check (clicks == 8, "120 bpm for 4 s = 8 clicks: got " + juce::String (clicks));
         }
 
+        for (auto [sub, expected, name] : { std::tuple { MetronomeProcessor::Subdivision::eighths, 16, "8ths" },
+                                            std::tuple { MetronomeProcessor::Subdivision::triplets, 24, "triplets" },
+                                            std::tuple { MetronomeProcessor::Subdivision::sixteenths, 32, "16ths" } })
+        {
+            MetronomeProcessor metronome;
+            metronome.prepareToPlay (rate, 512);
+            metronome.startBpm = 120.0;
+            metronome.subdivision = (int) sub;
+            metronome.subdivisionLevel = 0.5f;
+            metronome.start();
+            const auto clicks = countClicks (render (metronome, rate, 4.0, 4.0), rate);
+            check (clicks == expected, juce::String ("120 bpm ") + name + " for 4 s = " + juce::String (expected) + " clicks: got " + juce::String (clicks));
+        }
+
+        {
+            // Downbeat > beat > subdivision
+            MetronomeProcessor metronome;
+            metronome.prepareToPlay (rate, 512);
+            metronome.startBpm = 120.0;
+            metronome.subdivision = (int) MetronomeProcessor::Subdivision::eighths;
+            metronome.subdivisionLevel = 0.5f;
+            metronome.start();
+            const auto out = render (metronome, rate, 1.0, 1.0);
+            auto peakAround = [&out, rate] (double seconds)
+            {
+                const auto start = (int) (seconds * rate);
+                return out.getMagnitude (0, start, (int) (0.02 * rate));
+            };
+            const auto downbeat = peakAround (0.0), beat = peakAround (0.5), sub = peakAround (0.25);
+            check (downbeat > beat && beat > sub && sub > 0.01f,
+                   "levels downbeat > beat > subdivision: " + juce::String (downbeat, 2) + " / " + juce::String (beat, 2) + " / " + juce::String (sub, 2));
+        }
+
+        for (auto [snd, name] : { std::pair { MetronomeProcessor::Sound::click, "click" }, std::pair { MetronomeProcessor::Sound::drums, "drums" } })
+        {
+            MetronomeProcessor metronome;
+            metronome.prepareToPlay (rate, 512);
+            metronome.sound = (int) snd;
+            metronome.subdivision = (int) MetronomeProcessor::Subdivision::sixteenths;
+            metronome.start();
+            const auto out = render (metronome, rate, 2.0, 2.0);
+            const auto peak = out.getMagnitude (0, 0, out.getNumSamples());
+            bool finite = true;
+
+            for (int i = 0; i < out.getNumSamples(); ++i)
+                finite = finite && std::isfinite (out.getSample (0, i));
+
+            check (finite && peak > 0.1f && peak <= 1.0f, juce::String ("sound '") + name + "' renders, peak " + juce::String (peak, 2));
+        }
+
         {
             MetronomeProcessor metronome;
             metronome.prepareToPlay (rate, 512);
             metronome.startBpm = 120.0;
             metronome.beatsPerBar = 4;
+            metronome.subdivision = (int) MetronomeProcessor::Subdivision::triplets;   // trainer must still count bars
             metronome.trainerEnabled = true;
             metronome.trainerStepBpm = 10.0;
             metronome.trainerInterval = 1.0;

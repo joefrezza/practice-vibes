@@ -5,9 +5,9 @@
 namespace pv
 {
 
-/** A sample-accurate click track with an optional "speed trainer":
-    every N bars (or N minutes) the tempo rises by a step, up to a maximum.
-    Tempo changes are applied on bar lines.
+/** A sample-accurate click track with subdivisions, selectable (synthesised) sounds
+    and an optional "speed trainer": every N bars (or N minutes) the tempo rises by a
+    step, up to a maximum. Tempo changes are applied on bar lines.
 
     Settings are atomics written by the UI; the audio thread publishes
     the current tempo and beat for display.
@@ -18,12 +18,20 @@ public:
     MetronomeProcessor();
 
     enum class IntervalUnit { bars = 0, minutes = 1 };
+    enum class Subdivision  { quarters = 0, eighths = 1, triplets = 2, sixteenths = 3 };
+    enum class Sound        { beep = 0, click = 1, drums = 2 };
+
+    static int ticksPerBeat (Subdivision s)     { return s == Subdivision::eighths ? 2 : s == Subdivision::triplets ? 3
+                                                       : s == Subdivision::sixteenths ? 4 : 1; }
 
     // Settings (UI -> audio)
     std::atomic<double> startBpm { 100.0 };
     std::atomic<int> beatsPerBar { 4 };
     std::atomic<bool> accentFirstBeat { true };
     std::atomic<float> gain { 0.7f };
+    std::atomic<int> subdivision { (int) Subdivision::quarters };
+    std::atomic<int> sound { (int) Sound::beep };
+    std::atomic<float> subdivisionLevel { 0.45f };   // relative to a normal beat
 
     std::atomic<bool> trainerEnabled { false };
     std::atomic<double> trainerStepBpm { 2.0 };
@@ -69,7 +77,20 @@ public:
     void setStateInformation (const void*, int) override        {}
 
 private:
-    void onBeat (int beatInBar);
+    /** One synthesised hit: a (pitch-swept) sine, filtered noise, or both. */
+    struct Voice
+    {
+        double phase = 0.0, frequency = 0.0, frequencyEnd = 0.0, sweep = 1.0;
+        float toneLevel = 0.0f, toneEnvelope = 0.0f, toneDecay = 0.0f;
+        float noiseLevel = 0.0f, noiseEnvelope = 0.0f, noiseDecay = 0.0f;
+        float highPassAmount = 0.0f, lastNoise = 0.0f;   // crude high-pass for hats/snare
+        bool active = false;
+    };
+
+    void onTick (int beatInBar, int tickInBeat);
+    void trigger (double frequency, double frequencyEnd, float toneLevel, double toneDecaySeconds,
+                  float noiseLevel = 0.0f, double noiseDecaySeconds = 0.01, float highPass = 0.0f);
+    float renderVoices();
 
     double sampleRate = 48000.0;
 
@@ -78,15 +99,15 @@ private:
     std::atomic<int> currentBeat { -1 };
 
     // Audio-thread state
-    double samplesUntilNextBeat = 0.0;
-    int beatIndex = 0;                  // beat within bar of the NEXT click
+    double samplesUntilNextTick = 0.0;
+    int beatIndex = 0, tickIndex = 0;   // position of the NEXT tick
     double bpm = 100.0;
     int barsSinceStep = 0;
     double secondsSinceStep = 0.0;
 
-    // Click voice
-    double clickPhase = 0.0, clickPhaseDelta = 0.0;
-    float clickEnvelope = 0.0f, clickDecay = 0.999f, clickLevel = 1.0f;
+    std::array<Voice, 8> voices;
+    size_t nextVoice = 0;
+    juce::Random random;
     float lastGain = 0.7f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MetronomeProcessor)

@@ -187,6 +187,8 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
     for (auto* c : std::initializer_list<juce::Component*> { &metronomeHeader, &bpmDisplay, &metronomeButton, beatIndicator.get(),
                                                              &bpmSlider, &clickVolumeSlider, &bpmLabel, &beatsLabel,
                                                              &clickVolumeLabel, &beatsBox, &trainerToggle, &stepSlider,
+                                                             &subdivisionBox, &soundBox, &subdivisionLabel, &soundLabel,
+                                                             &subLevelLabel, &subLevelSlider,
                                                              &intervalSlider, &maxBpmSlider, &unitBox, &stepLabel,
                                                              &everyLabel, &maxLabel })
         addAndMakeVisible (c);
@@ -220,6 +222,30 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
 
     beatsBox.setSelectedId (metronome.beatsPerBar.load(), juce::dontSendNotification);
     beatsBox.onChange = [this] { metronome.beatsPerBar = juce::jmax (1, beatsBox.getSelectedId()); };
+
+    styleLabel (subdivisionLabel, "Subdivision");
+    subdivisionBox.addItem ("Quarter notes", 1);
+    subdivisionBox.addItem ("8th notes", 2);
+    subdivisionBox.addItem ("Triplets", 3);
+    subdivisionBox.addItem ("16th notes", 4);
+    subdivisionBox.setSelectedId (metronome.subdivision.load() + 1, juce::dontSendNotification);
+    subdivisionBox.onChange = [this]
+    {
+        metronome.subdivision = subdivisionBox.getSelectedId() - 1;
+        subLevelSlider.setEnabled (subdivisionBox.getSelectedId() > 1);
+    };
+
+    styleLabel (soundLabel, "Sound");
+    soundBox.addItem ("Beep", 1);
+    soundBox.addItem ("Click", 2);
+    soundBox.addItem ("Drums", 3);
+    soundBox.setSelectedId (metronome.sound.load() + 1, juce::dontSendNotification);
+    soundBox.onChange = [this] { metronome.sound = soundBox.getSelectedId() - 1; };
+
+    styleLabel (subLevelLabel, "Subdivision vol.");
+    styleHorizontal (subLevelSlider, 0.0, 100.0, 1.0, metronome.subdivisionLevel.load() * 100.0, " %");
+    subLevelSlider.onValueChange = [this] { metronome.subdivisionLevel = (float) (subLevelSlider.getValue() / 100.0); };
+    subLevelSlider.setEnabled (metronome.subdivision.load() > 0);
 
     styleLabel (clickVolumeLabel, "Click volume");
     styleHorizontal (clickVolumeSlider, -40.0, 6.0, 0.5, juce::Decibels::gainToDecibels (metronome.gain.load()), " dB");
@@ -453,6 +479,17 @@ void PracticePanel::resized()
         clickVolumeLabel.setBounds (row.removeFromLeft (100));
         clickVolumeSlider.setBounds (row.reduced (0, 4));
     }
+
+    {
+        auto row = right.removeFromTop (40);
+        subdivisionLabel.setBounds (row.removeFromLeft (110));
+        subdivisionBox.setBounds (row.removeFromLeft (150).reduced (0, 5));
+        row.removeFromLeft (20);
+        soundLabel.setBounds (row.removeFromLeft (60));
+        soundBox.setBounds (row.removeFromLeft (120).reduced (0, 5));
+    }
+
+    sliderRow (right, subLevelLabel, subLevelSlider);
 
     trainerToggle.setBounds (right.removeFromTop (36));
 
