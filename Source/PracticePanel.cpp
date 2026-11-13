@@ -99,7 +99,7 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
                                                              &loopButton, &clearLoopButton, &speedSlider, &pitchSlider,
                                                              &zoomOutButton, &zoomInButton, &fitButton, &zoomLoopButton,
                                                              &songVolumeSlider, &speedLabel, &pitchLabel, &songVolumeLabel, &hintLabel,
-                                                             &chordView })
+                                                             &chordView, &snapButton })
         addAndMakeVisible (c);
 
     openButton.onClick = [this] { openFile(); };
@@ -129,18 +129,26 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
         updateLoopButtons();
     };
 
+    snapButton.onClick = [this]
+    {
+        using Mode = WaveformView::SnapMode;
+        const auto mode = waveform.getSnapMode();
+        waveform.setSnapMode (mode == Mode::bars ? Mode::beats : (mode == Mode::beats ? Mode::off : Mode::bars));
+        updateSnapButton();
+    };
+    updateSnapButton();
+
     setAButton.onClick = [this]
     {
-        pendingLoopStart = player.getPositionSeconds();
+        pendingLoopStart = waveform.snap (player.getPositionSeconds());
         setAButton.setButtonText ("A = " + formatTime (pendingLoopStart));
     };
 
     setBButton.onClick = [this]
     {
-        const auto start = pendingLoopStart >= 0.0 ? pendingLoopStart : 0.0;
-        const auto end = player.getPositionSeconds();
+        const auto [start, end] = waveform.snapLoop (pendingLoopStart >= 0.0 ? pendingLoopStart : 0.0, player.getPositionSeconds());
 
-        if (std::abs (end - start) > 0.05)
+        if (end - start > 0.05)
         {
             player.setLoopSeconds (start, end);
             player.setLoopEnabled (true);
@@ -408,6 +416,14 @@ void PracticePanel::updateLoopButtons()
     waveform.repaint();
 }
 
+void PracticePanel::updateSnapButton()
+{
+    using Mode = WaveformView::SnapMode;
+    const auto mode = waveform.getSnapMode();
+    snapButton.setButtonText (mode == Mode::bars ? "Snap: bars" : (mode == Mode::beats ? "Snap: beats" : "Snap: off"));
+    snapButton.setTooltip ("Loop edges snap to the detected bars or beats. Tap to change.");
+}
+
 void PracticePanel::updateTrainerControls()
 {
     const auto on = trainerToggle.getToggleState();
@@ -496,9 +512,10 @@ void PracticePanel::resized()
     stopButton.setBounds (transport.removeFromLeft (small).reduced (2, 0));
     transport.removeFromLeft (20);
     clearLoopButton.setBounds (transport.removeFromRight (110).reduced (2, 0));
-    loopButton.setBounds (transport.removeFromRight (220).reduced (2, 0));
+    loopButton.setBounds (transport.removeFromRight (200).reduced (2, 0));
     setBButton.setBounds (transport.removeFromRight (small).reduced (2, 0));
     setAButton.setBounds (transport.removeFromRight (120).reduced (2, 0));
+    snapButton.setBounds (transport.removeFromRight (120).reduced (2, 0));
 
     area.removeFromTop (10);
 

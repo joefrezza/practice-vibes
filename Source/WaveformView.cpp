@@ -260,8 +260,9 @@ void WaveformView::paintWaveform (juce::Graphics& g, juce::Rectangle<int> area)
     // Selection being dragged
     if (gesture == Gesture::selecting)
     {
-        const auto x1 = juce::jmin (dragStartX, dragEndX);
-        const auto x2 = juce::jmax (dragStartX, dragEndX);
+        const auto range = selectionRange();
+        const auto x1 = secondsToX (range.first);
+        const auto x2 = secondsToX (range.second);
         g.setColour (juce::Colours::white.withAlpha (0.2f));
         g.fillRect (juce::Rectangle<float> (x1, (float) area.getY(), x2 - x1, (float) area.getHeight()));
     }
@@ -269,6 +270,41 @@ void WaveformView::paintWaveform (juce::Graphics& g, juce::Rectangle<int> area)
     // Playhead
     g.setColour (juce::Colours::white);
     g.fillRect (juce::Rectangle<float> (secondsToX (player.getPositionSeconds()) - 1.0f, (float) area.getY(), 2.0f, (float) area.getHeight()));
+}
+
+double WaveformView::snap (double seconds) const
+{
+    if (chords == nullptr || snapMode == SnapMode::off)
+        return seconds;
+
+    return chords->snapToGrid (seconds, snapMode == SnapMode::bars ? ChordTrack::GridUnit::bar : ChordTrack::GridUnit::beat);
+}
+
+std::pair<double, double> WaveformView::snapLoop (double start, double end) const
+{
+    if (end < start)
+        std::swap (start, end);
+
+    if (chords == nullptr || snapMode == SnapMode::off)
+        return { start, end };
+
+    const auto unit = snapMode == SnapMode::bars ? ChordTrack::GridUnit::bar : ChordTrack::GridUnit::beat;
+    const auto length = song != nullptr ? song->getLengthSeconds() : end;
+    start = chords->snapToGrid (start, unit);
+    end = chords->snapToGrid (end, unit);
+
+    if (end <= start)
+    {
+        const auto next = chords->neighbourGridLine (start, unit, 1);
+        end = next > start ? next : length;
+    }
+
+    return { start, juce::jmin (end, length) };
+}
+
+std::pair<double, double> WaveformView::selectionRange() const
+{
+    return snapLoop (xToSeconds (juce::jmin (dragStartX, dragEndX)), xToSeconds (juce::jmax (dragStartX, dragEndX)));
 }
 
 void WaveformView::setChords (std::shared_ptr<const ChordTrack> newChords)
@@ -517,14 +553,23 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
         case Gesture::movingLoopStart:
         case Gesture::movingLoopEnd:
         {
-            const auto t = juce::jlimit (0.0, song->getLengthSeconds(), xToSeconds (e.position.x));
+            const auto t = snap (juce::jlimit (0.0, song->getLengthSeconds(), xToSeconds (e.position.x)));
             auto start = player.getLoopStartSeconds();
             auto end = player.getLoopEndSeconds();
+            const auto unit = snapMode == SnapMode::bars ? ChordTrack::GridUnit::bar : ChordTrack::GridUnit::beat;
+            const auto snapping = chords != nullptr && snapMode != SnapMode::off;
 
+            // An edge can't cross the other one; when snapping it stops one grid step short.
             if (gesture == Gesture::movingLoopStart)
-                start = juce::jmin (t, end - 0.01);
+            {
+                const auto limit = snapping ? chords->neighbourGridLine (end, unit, -1) : end - 0.01;
+                start = juce::jmin (t, limit >= 0.0 ? limit : end - 0.01);
+            }
             else
-                end = juce::jmax (t, start + 0.01);
+            {
+                const auto limit = snapping ? chords->neighbourGridLine (start, unit, 1) : start + 0.01;
+                end = juce::jmax (t, limit >= 0.0 ? limit : start + 0.01);
+            }
 
             if (onLoopEdited)
                 onLoopEdited (start, end);
@@ -564,7 +609,10 @@ void WaveformView::mouseUp (const juce::MouseEvent& e)
     }
 
     if (gesture == Gesture::selecting && onLoopSelected)
-        onLoopSelected (xToSeconds (juce::jmin (dragStartX, dragEndX)), xToSeconds (juce::jmax (dragStartX, dragEndX)));
+    {
+        const auto range = selectionRange();
+        onLoopSelected (range.first, range.second);
+    }
     else if (gesture == Gesture::tapOrSelect && onSeek)
         onSeek (juce::jlimit (0.0, song->getLengthSeconds(), xToSeconds (e.position.x)));
 

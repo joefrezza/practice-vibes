@@ -37,6 +37,14 @@ struct ChordTrack
         return beatIndex >= 0 && beatIndex < (int) beatPositions.size() && beatPositions[(size_t) beatIndex] == 0;
     }
 
+    enum class GridUnit { beat, bar };
+
+    /** Nearest beat or bar line to `seconds` (the song start counts as one). Returns `seconds` unchanged without beats. */
+    double snapToGrid (double seconds, GridUnit) const;
+
+    /** Closest grid line strictly after (direction > 0) or before (direction < 0) `seconds`, or -1 if there is none. */
+    double neighbourGridLine (double seconds, GridUnit, int direction) const;
+
     /** Index of the chord playing at `seconds`, or -1. */
     int chordIndexAt (double seconds) const;
 

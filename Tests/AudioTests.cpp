@@ -427,6 +427,24 @@ namespace
         check (downbeatsSeen > 0 && downbeatsOk >= downbeatsSeen * 9 / 10,
                "downbeats on bar starts: " + juce::String (downbeatsOk) + " of " + juce::String (downbeatsSeen));
 
+        {
+            ChordTrack grid;   // 4/4 at 120 bpm, first downbeat on the second beat (pickup)
+            for (int i = 0; i < 17; ++i)
+            {
+                grid.beats.push_back (0.25 + i * 0.5);
+                grid.beatPositions.push_back ((i + 3) % 4);
+            }
+
+            using U = ChordTrack::GridUnit;
+            check (std::abs (grid.snapToGrid (2.6, U::bar) - 2.75) < 1.0e-9 && std::abs (grid.snapToGrid (1.6, U::bar) - 0.75) < 1.0e-9
+                       && std::abs (grid.snapToGrid (1.6, U::beat) - 1.75) < 1.0e-9 && grid.snapToGrid (0.2, U::bar) == 0.0,
+                   "snap to bars/beats: 2.6->" + juce::String (grid.snapToGrid (2.6, U::bar)) + " 1.6->" + juce::String (grid.snapToGrid (1.6, U::bar))
+                       + " (beat " + juce::String (grid.snapToGrid (1.6, U::beat)) + ")");
+            check (std::abs (grid.neighbourGridLine (0.75, U::bar, 1) - 2.75) < 1.0e-9 && std::abs (grid.neighbourGridLine (2.75, U::bar, -1) - 0.75) < 1.0e-9
+                       && grid.neighbourGridLine (8.25, U::bar, 1) < 0.0,
+                   "neighbouring bar lines");
+        }
+
         ChordTrack::Chord bFlat { 0.0, 1.0, 10, ChordTrack::major, -1, 0, 4 };
         ChordTrack spelling;
         spelling.keyRoot = 5;   // F major: flats

@@ -32,6 +32,51 @@ int ChordTrack::chordIndexAt (double seconds) const
     return seconds < chords[(size_t) index].end ? index : -1;
 }
 
+namespace
+{
+    std::vector<double> gridLines (const ChordTrack& track, ChordTrack::GridUnit unit)
+    {
+        std::vector<double> lines { 0.0 };
+
+        for (size_t i = 0; i < track.beats.size(); ++i)
+            if (track.beats[i] > 0.0 && (unit == ChordTrack::GridUnit::beat || track.isDownbeat ((int) i)))
+                lines.push_back (track.beats[i]);
+
+        return lines;
+    }
+}
+
+double ChordTrack::snapToGrid (double seconds, GridUnit unit) const
+{
+    if (beats.empty())
+        return seconds;
+
+    const auto lines = gridLines (*this, unit);
+    auto it = std::lower_bound (lines.begin(), lines.end(), seconds);
+
+    if (it == lines.end())
+        return lines.back();
+
+    if (it != lines.begin() && seconds - *(it - 1) < *it - seconds)
+        --it;
+
+    return *it;
+}
+
+double ChordTrack::neighbourGridLine (double seconds, GridUnit unit, int direction) const
+{
+    const auto lines = gridLines (*this, unit);
+
+    if (direction > 0)
+    {
+        auto it = std::upper_bound (lines.begin(), lines.end(), seconds + 1.0e-6);
+        return it != lines.end() ? *it : -1.0;
+    }
+
+    auto it = std::lower_bound (lines.begin(), lines.end(), seconds - 1.0e-6);
+    return it != lines.begin() ? *(it - 1) : -1.0;
+}
+
 juce::String ChordTrack::noteName (int pitchClass, bool flats)
 {
     static const char* sharpNames[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };

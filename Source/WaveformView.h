@@ -32,6 +32,15 @@ public:
     void zoomToRange (double startSeconds, double endSeconds);
     bool isZoomed() const;
 
+    /** Loop edges snap to the detected bars or beats (once chords are analysed). */
+    enum class SnapMode { off, beats, bars };
+    void setSnapMode (SnapMode mode)    { snapMode = mode; }
+    SnapMode getSnapMode() const        { return snapMode; }
+
+    /** Snaps a time, or a loop range (kept at least one grid step long), to the current grid. */
+    double snap (double seconds) const;
+    std::pair<double, double> snapLoop (double start, double end) const;
+
     /** Chord names along the top of the waveform (nullptr hides them), transposed by `semitones`. */
     void setChords (std::shared_ptr<const ChordTrack>);
     void setChordTranspose (int semitones);
@@ -67,6 +76,9 @@ private:
     std::shared_ptr<const LoadedSong> song;
     std::shared_ptr<const ChordTrack> chords;
     int chordTranspose = 0;
+    SnapMode snapMode = SnapMode::bars;
+
+    std::pair<double, double> selectionRange() const;
 
     juce::Rectangle<int> mainArea, overviewArea;
     double viewStart = 0.0, viewLength = 1.0;
