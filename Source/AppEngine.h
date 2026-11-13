@@ -1,7 +1,9 @@
 #pragma once
 
 #include <juce_audio_utils/juce_audio_utils.h>
+#include "MetronomeProcessor.h"
 #include "MidiMonitor.h"
+#include "PlayerProcessor.h"
 #include "PluginCatalogue.h"
 #include "PluginChain.h"
 
@@ -29,6 +31,10 @@ public:
     std::unique_ptr<PluginChain> chain;
     std::unique_ptr<PluginCatalogue> catalogue;
     std::unique_ptr<MidiMonitor> midi;
+
+    // Owned by the audio graph inside `chain`; valid while `chain` exists.
+    PlayerProcessor* player = nullptr;
+    MetronomeProcessor* metronome = nullptr;
 
 private:
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);

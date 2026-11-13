@@ -35,7 +35,7 @@ juce::String AppLog::getText() const
 
 void AppLog::logMessage (const juce::String& message)
 {
-    const auto line = juce::Time::getCurrentTime().toString (false, true, true, true) + "  " + message;
+    const auto line = juce::Time::getCurrentTime().toString (false, true, true, true) + juce::String::formatted (".%03d  ", (int) (juce::Time::getCurrentTime().toMilliseconds() % 1000)) + message;
 
     {
         const juce::ScopedLock sl (lock);

@@ -42,7 +42,8 @@ PluginChain::PluginChain (juce::AudioDeviceManager& dm, juce::AudioPluginFormatM
     audioInNode     = graph.addNode (std::make_unique<IOProcessor> (IOProcessor::audioInputNode));
     audioOutNode    = graph.addNode (std::make_unique<IOProcessor> (IOProcessor::audioOutputNode));
     inputStageNode  = graph.addNode (std::make_unique<GainMeterProcessor> ("Input stage", 1));
-    outputStageNode = graph.addNode (std::make_unique<GainMeterProcessor> ("Output stage", 2));
+    outputStageNode = graph.addNode (std::make_unique<GainMeterProcessor> ("Guitar output", 2));
+    masterNode      = graph.addNode (std::make_unique<GainMeterProcessor> ("Master", 2));
 
     // Start muted: on an iPad the built-in mic + speaker would otherwise howl.
     getOutputStage().muted = true;
@@ -61,6 +62,7 @@ PluginChain::~PluginChain()
     deviceManager.removeAudioCallback (&player);
     player.setProcessor (nullptr);
     slots.clear();
+    sources.clear();
     graph.clear();
 }
 
@@ -106,6 +108,11 @@ GainMeterProcessor& PluginChain::getOutputStage() const
     return *static_cast<GainMeterProcessor*> (outputStageNode->getProcessor());
 }
 
+GainMeterProcessor& PluginChain::getMasterStage() const
+{
+    return *static_cast<GainMeterProcessor*> (masterNode->getProcessor());
+}
+
 //==============================================================================
 void PluginChain::loadPlugin (const juce::PluginDescription& description, NodeCallback callback)
 {
@@ -115,15 +122,15 @@ void PluginChain::loadPlugin (const juce::PluginDescription& description, NodeCa
     juce::Logger::writeToLog ("Loading " + description.name + " (" + description.pluginFormatName + ")...");
 
     formatManager.createPluginInstanceAsync (description, sampleRate, blockSize,
-        [this, weakAlive, callback = std::move (callback)] (std::unique_ptr<juce::AudioPluginInstance> instance,
-                                                            const juce::String& error)
+        [this, weakAlive, cb = std::move (callback)] (std::unique_ptr<juce::AudioPluginInstance> instance,
+                                                      const juce::String& error)
         {
             if (weakAlive.expired())
                 return;
 
             if (instance == nullptr)
             {
-                callback (nullptr, error.isNotEmpty() ? error : juce::String ("unknown error"));
+                cb (nullptr, error.isNotEmpty() ? error : juce::String ("unknown error"));
                 return;
             }
 
@@ -138,7 +145,7 @@ void PluginChain::loadPlugin (const juce::PluginDescription& description, NodeCa
 
             if (node == nullptr)
             {
-                callback (nullptr, "the audio graph refused the plugin");
+                cb (nullptr, "the audio graph refused the plugin");
                 return;
             }
 
@@ -148,21 +155,21 @@ void PluginChain::loadPlugin (const juce::PluginDescription& description, NodeCa
             juce::Logger::writeToLog ("Loaded " + fullDescription.name
                                       + " [in " + juce::String (ins) + " ch, out " + juce::String (outs)
                                       + " ch, latency " + juce::String (latency) + " samples]");
-            callback (node, {});
+            cb (node, {});
         });
 }
 
 void PluginChain::addPlugin (const juce::PluginDescription& description, LoadCallback onDone)
 {
-    loadPlugin (description, [this, name = description.name, onDone = std::move (onDone)] (NodePtr node, const juce::String& error)
+    loadPlugin (description, [this, name = description.name, done = std::move (onDone)] (NodePtr node, const juce::String& error)
     {
         if (node == nullptr)
             juce::Logger::writeToLog ("Could not load " + name + ": " + error);
 
         notifyChange();
 
-        if (onDone)
-            onDone (node == nullptr ? (error.isNotEmpty() ? error : juce::String ("failed")) : juce::String());
+        if (done)
+            done (node == nullptr ? (error.isNotEmpty() ? error : juce::String ("failed")) : juce::String());
     });
 }
 
@@ -250,8 +257,19 @@ void PluginChain::rebuildConnections()
     for (int c = 0; c < 2; ++c)
         connect (previous, juce::jmin (c, previousChannels - 1), outputStageNode->nodeID, c);
 
+    for (int c = 0; c < 2; ++c)
+        connect (outputStageNode->nodeID, c, masterNode->nodeID, c);
+
+    for (auto& source : sources)
+    {
+        const auto outs = source->getProcessor()->getMainBusNumOutputChannels();
+
+        for (int c = 0; c < 2 && outs > 0; ++c)
+            connect (source->nodeID, juce::jmin (c, outs - 1), masterNode->nodeID, c);
+    }
+
     for (int c = 0; c < juce::jmin (2, numDeviceOuts); ++c)
-        connect (outputStageNode->nodeID, c, audioOutNode->nodeID, c);
+        connect (masterNode->nodeID, c, audioOutNode->nodeID, c);
 
     graph.rebuild();
 }

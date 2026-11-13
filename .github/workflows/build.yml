@@ -25,6 +25,9 @@ jobs:
       - name: Build
         run: cmake --build --preset windows-release
 
+      - name: Run DSP tests
+        run: '& "build/windows/PracticeVibesTests_artefacts/Release/PracticeVibesTests.exe"'
+
       - name: Package
         shell: pwsh
         run: Compress-Archive -Path "build/windows/PracticeVibes_artefacts/Release/*" -DestinationPath PracticeVibes-windows.zip

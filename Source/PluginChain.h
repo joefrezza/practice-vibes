@@ -6,13 +6,14 @@
 namespace pv
 {
 
-/** The guitar signal path:
+/** The app's audio graph:
 
         device input (one selected channel)
           -> input stage (gain + meter, mono)
           -> plugin 1 -> plugin 2 -> ...        (AUv3 on iPad, VST3 on Windows)
-          -> output stage (gain + mute + meter, stereo)
-          -> device output (first two channels)
+          -> guitar output stage (gain + mute + meter, stereo)  --+
+                                                                   +-> master (meter) -> device output
+        other sources (song player, metronome...)  ---------------+
 
     All methods must be called on the message thread.
 */
@@ -41,7 +42,20 @@ public:
     int getInputChannel() const noexcept                { return inputChannel; }
 
     GainMeterProcessor& getInputStage() const;
-    GainMeterProcessor& getOutputStage() const;
+    GainMeterProcessor& getOutputStage() const;     // guitar output (monitor on/off)
+    GainMeterProcessor& getMasterStage() const;
+
+    /** Adds a stereo source (e.g. the song player) that is mixed into the master output.
+        The graph owns the processor; the returned pointer stays valid while this chain exists.
+    */
+    template <typename ProcessorType>
+    ProcessorType* addSource (std::unique_ptr<ProcessorType> processor)
+    {
+        auto* raw = processor.get();
+        sources.push_back (graph.addNode (std::move (processor), std::nullopt, juce::AudioProcessorGraph::UpdateKind::none));
+        rebuildConnections();
+        return raw;
+    }
 
     /** Serialises the chain, including every plugin's own state. */
     std::unique_ptr<juce::XmlElement> createStateXml() const;
@@ -81,8 +95,9 @@ private:
     juce::AudioProcessorGraph graph;
     juce::AudioProcessorPlayer player;
 
-    NodePtr audioInNode, audioOutNode, inputStageNode, outputStageNode;
+    NodePtr audioInNode, audioOutNode, inputStageNode, outputStageNode, masterNode;
     std::vector<Slot> slots;
+    std::vector<NodePtr> sources;
     int inputChannel = 0;
 
     // Async plugin-creation callbacks check this so they never touch a deleted chain.

@@ -16,6 +16,8 @@ AppEngine::AppEngine()
     juce::Logger::writeToLog ("Plugin formats: " + (formatNames.isEmpty() ? juce::String ("none") : formatNames.joinIntoString (", ")));
 
     chain = std::make_unique<PluginChain> (deviceManager, formatManager);
+    player = chain->addSource (std::make_unique<PlayerProcessor>());
+    metronome = chain->addSource (std::make_unique<MetronomeProcessor>());
     catalogue = std::make_unique<PluginCatalogue> (formatManager);
     midi = std::make_unique<MidiMonitor> (deviceManager);
 }
@@ -25,6 +27,8 @@ AppEngine::~AppEngine()
     alive.reset();
     midi.reset();
     catalogue.reset();
+    player = nullptr;
+    metronome = nullptr;
     chain.reset();
     deviceManager.closeAudioDevice();
 }
