@@ -61,7 +61,13 @@ juce::String ChordTrack::chordName (const Chord& chord, int semitones) const
     if (chord.root < 0)
         return "N.C.";
 
-    return noteName (chord.root + semitones, keyUsesFlats (keyRoot + semitones, keyIsMinor)) + qualitySuffix (chord.quality);
+    const auto flats = keyUsesFlats (keyRoot + semitones, keyIsMinor);
+    auto name = noteName (chord.root + semitones, flats) + qualitySuffix (chord.quality);
+
+    if (chord.bass >= 0 && chord.bass != chord.root)
+        name << "/" << noteName (chord.bass + semitones, flats);
+
+    return name;
 }
 
 juce::String ChordTrack::keyName (int semitones) const
@@ -413,6 +419,15 @@ namespace
         return norm;
     }
 
+    /** Semitones above the root, per ChordTrack::Quality. */
+    const std::array<std::vector<int>, ChordTrack::numQualities>& chordIntervals()
+    {
+        static const std::array<std::vector<int>, ChordTrack::numQualities> intervals {{
+            { 0, 4, 7 }, { 0, 3, 7 }, { 0, 4, 7, 10 }, { 0, 3, 7, 10 }, { 0, 4, 7, 11 }, { 0, 7 }
+        }};
+        return intervals;
+    }
+
     struct ChordModel
     {
         static constexpr int numQualities = ChordTrack::numQualities;
@@ -423,9 +438,7 @@ namespace
 
         ChordModel()
         {
-            static const std::vector<int> intervals[numQualities] = {
-                { 0, 4, 7 }, { 0, 3, 7 }, { 0, 4, 7, 10 }, { 0, 3, 7, 10 }, { 0, 4, 7, 11 }, { 0, 7 }
-            };
+            const auto& intervals = chordIntervals();
 
             // Each chord tone contributes its first harmonics (octave, fifth, ...), decaying.
             static const int harmonicOffsets[] = { 0, 12, 19, 24, 28, 31 };
@@ -437,7 +450,7 @@ namespace
                     auto& t = templates[(size_t) (q * 12 + root)];
                     t.fill (0.0f);
 
-                    for (auto interval : intervals[q])
+                    for (auto interval : intervals[(size_t) q])
                     {
                         auto weight = 1.0f;
 
@@ -615,6 +628,7 @@ namespace
 
 //==============================================================================
 bool chordAnalyzerDebug = false;   // developer tool only: prints per-beat details
+float slashBassRatio = 1.25f;      // how much stronger than the root a bass note must be to make a slash chord
 
 ChordTrack analyseChords (const float* mono, int numSamples, double sampleRate, const std::atomic<bool>* cancel)
 {
@@ -799,8 +813,15 @@ ChordTrack analyseChords (const float* mono, int numSamples, double sampleRate, 
             for (size_t c = 0; c < 12; ++c)
                 similarity += t[c] * tpl[c];
 
-            const auto root = (size_t) ChordModel::rootOf (s);
-            const auto bassTerm = b[root] / bassMax;
+            // Bass on the root supports a chord; bass on its third or fifth (an inversion) a little.
+            const auto root = ChordModel::rootOf (s);
+            auto bassTerm = b[(size_t) root];
+
+            for (auto interval : chordIntervals()[(size_t) ChordModel::qualityOf (s)])
+                if (interval == 3 || interval == 4 || interval == 7)
+                    bassTerm = juce::jmax (bassTerm, 0.35f * b[(size_t) ((root + interval) % 12)]);
+
+            bassTerm /= bassMax;
             emission[(size_t) i][(size_t) s] = similarity + 0.12f * bassTerm - model.qualityPenalty[(size_t) ChordModel::qualityOf (s)];
         }
 
@@ -900,9 +921,67 @@ ChordTrack analyseChords (const float* mono, int numSamples, double sampleRate, 
                 chord.quality = q;
             }
         }
-        chord.startBeat = i;
-        chord.numBeats = j - i;
-        track.chords.push_back (chord);
+        // Slash chord: in each bar of the chord, does the bass clearly sit on another chord tone
+        // (or a 7th) than the root? Bars with the same bass are then joined again.
+        auto slashBass = [&] (int first, int last)
+        {
+            if (chord.root < 0)
+                return -1;
+
+            std::array<float, 12> bassSum {};
+
+            for (int b = first; b < last; ++b)
+            {
+                const auto& bb = beatBass[(size_t) b];
+                const auto peak = juce::jmax (1.0e-6f, *std::max_element (bb.begin(), bb.end()));
+
+                for (size_t c = 0; c < 12; ++c)
+                    bassSum[c] += bb[c] / peak;
+            }
+
+            const auto bassNote = (int) std::distance (bassSum.begin(), std::max_element (bassSum.begin(), bassSum.end()));
+            const auto interval = (bassNote - chord.root + 12) % 12;
+            const auto& tones = chordIntervals()[(size_t) chord.quality];
+            const auto isChordTone = std::find (tones.begin(), tones.end(), interval) != tones.end();
+            const auto isSeventh = interval == 10 || interval == 11;
+            const auto needed = isChordTone ? slashBassRatio : slashBassRatio * 1.2f;
+
+            return (bassNote != chord.root && (isChordTone || isSeventh)
+                    && bassSum[(size_t) bassNote] >= needed * bassSum[(size_t) chord.root]) ? bassNote : -1;
+        };
+
+        for (int first = i; first < j;)
+        {
+            auto last = first + 1;
+
+            while (last < j && ! track.isDownbeat (last))
+                ++last;
+
+            const auto pieceBass = slashBass (first, last);
+
+            if (first > i && track.chords.back().bass == pieceBass)
+            {
+                track.chords.back().numBeats += last - first;
+            }
+            else
+            {
+                auto piece = chord;
+                piece.startBeat = first;
+                piece.numBeats = last - first;
+                piece.bass = pieceBass;
+                track.chords.push_back (piece);
+            }
+
+            first = last;
+        }
+
+        for (auto k = track.chords.size(); k-- > 0 && track.chords[k].startBeat >= i;)
+        {
+            auto& c = track.chords[k];
+            c.start = track.beats[(size_t) c.startBeat];
+            c.end = c.startBeat + c.numBeats < numBeats ? track.beats[(size_t) (c.startBeat + c.numBeats)] : lengthSeconds;
+        }
+
         i = j;
     }
 

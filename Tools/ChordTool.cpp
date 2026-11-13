@@ -6,7 +6,7 @@
 
 #include <iostream>
 
-namespace pv { extern bool chordAnalyzerDebug; }
+namespace pv { extern bool chordAnalyzerDebug; extern float slashBassRatio; }
 
 namespace
 {
@@ -76,7 +76,7 @@ namespace
                         line += "      ";
                 }
 
-                line += (b == chord.startBeat ? " " + track.chordName (chord) : juce::String (" .")).paddedRight (' ', 6);
+                line += (b == chord.startBeat ? " " + track.chordName (chord) : juce::String (" .")).paddedRight (' ', 8);
             }
         }
 
@@ -102,9 +102,11 @@ int main (int argc, char* argv[])
     for (int i = 1; i < argc; ++i)
         if (juce::String (argv[i]) == "--debug")
             pv::chordAnalyzerDebug = true;
+        else if (juce::String (argv[i]).startsWith ("--slash="))
+            pv::slashBassRatio = juce::String (argv[i]).fromFirstOccurrenceOf ("=", false, false).getFloatValue();
 
     for (int i = 1; i < argc; ++i)
-        if (juce::String (argv[i]) != "--debug")
+        if (! juce::String (argv[i]).startsWith ("--"))
             analyseFile (formats, juce::File (juce::String::fromUTF8 (argv[i])));
 
     return 0;

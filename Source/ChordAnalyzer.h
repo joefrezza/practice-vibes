@@ -17,6 +17,7 @@ struct ChordTrack
         double start = 0.0, end = 0.0;
         int root = -1;                  // pitch class 0 = C ... 11 = B; -1 = no chord
         Quality quality = major;
+        int bass = -1;                  // pitch class of a bass note other than the root (slash chord), else -1
         int startBeat = 0, numBeats = 0;
     };
 

@@ -328,19 +328,14 @@ namespace
         }
     }
 
-    /** A synthetic band: 120 bpm, kick on every beat, bass + harmonic-rich triads, C | Am | F | G. */
-    void testChordAnalysis()
-    {
-        std::cout << "Chord analysis" << std::endl;
+    struct TestChord { int root; bool minor; int bass; };   // bass: pitch class, -1 = root
 
-        constexpr double sampleRate = 44100.0, bpm = 120.0;
-        constexpr int bars = 16;
-        const auto beatSeconds = 60.0 / bpm;
+    /** A synthetic band at 120 bpm: kick on every beat, bass + harmonic-rich triads, one chord per bar. */
+    std::vector<float> synthesiseBand (const std::vector<TestChord>& progression, int bars, double sampleRate)
+    {
+        const auto beatSeconds = 0.5;
         const auto length = (int) (sampleRate * beatSeconds * 4 * bars);
         std::vector<float> audio ((size_t) length, 0.0f);
-
-        struct TestChord { int root; bool minor; };
-        const TestChord progression[] = { { 0, false }, { 9, true }, { 5, false }, { 7, false } };
         auto midiToHz = [] (double midi) { return 440.0 * std::pow (2.0, (midi - 69.0) / 12.0); };
         juce::Random random (42);
 
@@ -349,7 +344,7 @@ namespace
             const auto t = i / sampleRate;
             const auto beat = (int) (t / beatSeconds);
             const auto sinceBeat = t - beat * beatSeconds;
-            const auto& chord = progression[(beat / 4) % 4];
+            const auto& chord = progression[(size_t) ((beat / 4) % (int) progression.size())];
             const auto triadBase = 60 + (chord.root > 4 ? chord.root - 12 : chord.root);
             const int notes[] = { triadBase, triadBase + (chord.minor ? 3 : 4), triadBase + 7 };
             auto sample = 0.0;
@@ -358,13 +353,26 @@ namespace
                 for (int h = 1; h <= 5; ++h)
                     sample += 0.08 / h * std::sin (juce::MathConstants<double>::twoPi * midiToHz (note) * h * t);
 
-            const auto bassNote = 36 + chord.root;
+            const auto bassNote = 36 + (chord.bass >= 0 ? chord.bass : chord.root);
             sample += 0.2 * std::sin (juce::MathConstants<double>::twoPi * midiToHz (bassNote) * t) * std::exp (-sinceBeat * 3.0);
             sample += 0.5 * std::exp (-sinceBeat * 40.0) * (std::sin (juce::MathConstants<double>::twoPi * 60.0 * sinceBeat)
                                                              + 0.3 * (random.nextFloat() * 2.0f - 1.0f));
             audio[(size_t) i] = (float) (0.5 * sample);
         }
 
+        return audio;
+    }
+
+    void testChordAnalysis()
+    {
+        std::cout << "Chord analysis" << std::endl;
+
+        constexpr double sampleRate = 44100.0, bpm = 120.0;
+        constexpr int bars = 16;
+        const auto beatSeconds = 60.0 / bpm;
+        const std::vector<TestChord> progression { { 0, false, -1 }, { 9, true, -1 }, { 5, false, -1 }, { 7, false, -1 } };
+        const auto audio = synthesiseBand (progression, bars, sampleRate);
+        const auto length = (int) audio.size();
         const auto track = analyseChords (audio.data(), length, sampleRate);
 
         const auto tempoOk = std::abs (track.bpm - bpm) < 3.0 || std::abs (track.bpm - bpm / 2) < 1.5 || std::abs (track.bpm - bpm * 2) < 6.0;
@@ -376,7 +384,7 @@ namespace
         for (int beat = 4; beat < bars * 4 - 1; ++beat)   // skip the first bar while things settle
         {
             const auto t = (beat + 0.5) * beatSeconds;
-            const auto& truth = progression[(beat / 4) % 4];
+            const auto& truth = progression[(size_t) ((beat / 4) % 4)];
             const auto index = track.chordIndexAt (t);
             ++total;
 
@@ -389,6 +397,13 @@ namespace
         }
 
         check (correct >= total * 9 / 10, "chords correct on " + juce::String (correct) + " of " + juce::String (total) + " beats");
+
+        auto slashes = 0;
+
+        for (const auto& c : track.chords)
+            slashes += c.bass >= 0 ? 1 : 0;
+
+        check (slashes == 0, "no slash chords when the bass plays roots: " + juce::String (slashes));
 
         juce::StringArray names;
 
@@ -412,13 +427,54 @@ namespace
         check (downbeatsSeen > 0 && downbeatsOk >= downbeatsSeen * 9 / 10,
                "downbeats on bar starts: " + juce::String (downbeatsOk) + " of " + juce::String (downbeatsSeen));
 
-        ChordTrack::Chord bFlat { 0.0, 1.0, 10, ChordTrack::major, 0, 4 };
+        ChordTrack::Chord bFlat { 0.0, 1.0, 10, ChordTrack::major, -1, 0, 4 };
         ChordTrack spelling;
         spelling.keyRoot = 5;   // F major: flats
         check (spelling.chordName (bFlat) == "Bb" && spelling.chordName (bFlat, 2) == "C", "names follow key and transpose: "
                + spelling.chordName (bFlat) + ", " + spelling.chordName (bFlat, 2));
         spelling.keyRoot = 4;   // E major: sharps
         check (spelling.chordName (bFlat) == "A#", "sharp spelling in E major: " + spelling.chordName (bFlat));
+    }
+
+    /** Descending bass line C | G/B | Am | C/G: inversions must keep their chord and show the bass. */
+    void testSlashChords()
+    {
+        std::cout << "Slash chords" << std::endl;
+
+        constexpr double sampleRate = 44100.0;
+        constexpr int bars = 16;
+        const std::vector<TestChord> progression { { 0, false, -1 }, { 7, false, 11 }, { 9, true, -1 }, { 0, false, 7 } };
+        const auto audio = synthesiseBand (progression, bars, sampleRate);
+        const auto track = analyseChords (audio.data(), (int) audio.size(), sampleRate);
+
+        auto correct = 0, total = 0;
+
+        for (int bar = 1; bar < bars - 1; ++bar)
+        {
+            const auto& truth = progression[(size_t) (bar % 4)];
+            const auto index = track.chordIndexAt ((bar * 4 + 2) * 0.5);
+            ++total;
+
+            if (index >= 0)
+            {
+                const auto& c = track.chords[(size_t) index];
+                const auto minor = c.quality == ChordTrack::minor || c.quality == ChordTrack::minor7;
+                correct += (c.root == truth.root && minor == truth.minor && c.bass == truth.bass) ? 1 : 0;
+            }
+        }
+
+        juce::StringArray names;
+
+        for (const auto& c : track.chords)
+            names.add (track.chordName (c));
+
+        check (correct >= total - 1, "chord and bass correct in " + juce::String (correct) + " of " + juce::String (total) + " bars");
+        std::cout << "        detected: " << names.joinIntoString (" ").substring (0, 120) << std::endl;
+
+        ChordTrack::Chord gOverB { 0.0, 1.0, 7, ChordTrack::major, 11, 0, 4 };
+        ChordTrack spelling;
+        check (spelling.chordName (gOverB) == "G/B" && spelling.chordName (gOverB, 3) == "Bb/D",
+               "slash names transpose: " + spelling.chordName (gOverB) + ", " + spelling.chordName (gOverB, 3));
     }
 }
 
@@ -430,6 +486,7 @@ int main()
     testFileLoading();
     testMetronome();
     testChordAnalysis();
+    testSlashChords();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;
