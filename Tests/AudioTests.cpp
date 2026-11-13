@@ -331,10 +331,10 @@ namespace
     struct TestChord { int root; bool minor; int bass; };   // bass: pitch class, -1 = root
 
     /** A synthetic band at 120 bpm: kick on every beat, bass + harmonic-rich triads, one chord per bar. */
-    std::vector<float> synthesiseBand (const std::vector<TestChord>& progression, int bars, double sampleRate)
+    std::vector<float> synthesiseBand (const std::vector<TestChord>& progression, int bars, double sampleRate,
+                                       int beatsPerBar = 4, double beatSeconds = 0.5)
     {
-        const auto beatSeconds = 0.5;
-        const auto length = (int) (sampleRate * beatSeconds * 4 * bars);
+        const auto length = (int) (sampleRate * beatSeconds * beatsPerBar * bars);
         std::vector<float> audio ((size_t) length, 0.0f);
         auto midiToHz = [] (double midi) { return 440.0 * std::pow (2.0, (midi - 69.0) / 12.0); };
         juce::Random random (42);
@@ -344,7 +344,7 @@ namespace
             const auto t = i / sampleRate;
             const auto beat = (int) (t / beatSeconds);
             const auto sinceBeat = t - beat * beatSeconds;
-            const auto& chord = progression[(size_t) ((beat / 4) % (int) progression.size())];
+            const auto& chord = progression[(size_t) ((beat / beatsPerBar) % (int) progression.size())];
             const auto triadBase = 60 + (chord.root > 4 ? chord.root - 12 : chord.root);
             const int notes[] = { triadBase, triadBase + (chord.minor ? 3 : 4), triadBase + 7 };
             auto sample = 0.0;
@@ -355,7 +355,7 @@ namespace
 
             const auto bassNote = 36 + (chord.bass >= 0 ? chord.bass : chord.root);
             sample += 0.2 * std::sin (juce::MathConstants<double>::twoPi * midiToHz (bassNote) * t) * std::exp (-sinceBeat * 3.0);
-            sample += 0.5 * std::exp (-sinceBeat * 40.0) * (std::sin (juce::MathConstants<double>::twoPi * 60.0 * sinceBeat)
+            sample += (beat % beatsPerBar == 0 ? 0.7 : 0.5) * std::exp (-sinceBeat * 40.0) * (std::sin (juce::MathConstants<double>::twoPi * 60.0 * sinceBeat)
                                                              + 0.3 * (random.nextFloat() * 2.0f - 1.0f));
             audio[(size_t) i] = (float) (0.5 * sample);
         }
@@ -476,6 +476,47 @@ namespace
         check (spelling.chordName (gOverB) == "G/B" && spelling.chordName (gOverB, 3) == "Bb/D",
                "slash names transpose: " + spelling.chordName (gOverB) + ", " + spelling.chordName (gOverB, 3));
     }
+
+    /** Odd meters: chords change once per bar of 3, 5 or 7 beats. */
+    void testMeters()
+    {
+        std::cout << "Meters" << std::endl;
+
+        const std::vector<TestChord> progression { { 0, false, -1 }, { 9, true, -1 }, { 5, false, -1 }, { 7, false, -1 } };
+
+        struct Case { int beatsPerBar; double beatSeconds; const char* name; };
+
+        for (auto c : { Case { 4, 0.5, "4/4" }, Case { 3, 0.5, "3/4" }, Case { 5, 0.5, "5/4" },
+                        Case { 7, 0.3, "7/8" }, Case { 7, 0.25, "7/8" }, Case { 5, 0.25, "5/8" } })
+        {
+            const auto bars = juce::jmax (12, 96 / c.beatsPerBar);
+            const auto audio = synthesiseBand (progression, bars, 44100.0, c.beatsPerBar, c.beatSeconds);
+            const auto track = analyseChords (audio.data(), (int) audio.size(), 44100.0);
+            check (track.timeSignature() == c.name, juce::String (c.name) + " (pulse " + juce::String (60.0 / c.beatSeconds, 0)
+                                                        + " bpm): detected " + track.timeSignature() + " at " + juce::String (track.bpm, 1) + " bpm");
+        }
+
+        // Meter change: 16 bars of 7/4, 16 of 4/4, 16 of 7/4 (like "Money").
+        {
+            auto audio = synthesiseBand (progression, 16, 44100.0, 7, 0.5);
+            const auto middle = synthesiseBand ({ { 2, false, -1 }, { 7, false, -1 } }, 16, 44100.0, 4, 0.5);
+            audio.insert (audio.end(), middle.begin(), middle.end());
+            const auto end = synthesiseBand (progression, 16, 44100.0, 7, 0.5);
+            audio.insert (audio.end(), end.begin(), end.end());
+            const auto track = analyseChords (audio.data(), (int) audio.size(), 44100.0);
+
+            auto meterAt = [&track] (double seconds)
+            {
+                const auto& b = track.beats;
+                const auto index = (int) std::distance (b.begin(), std::upper_bound (b.begin(), b.end(), seconds)) - 1;
+                return track.timeSignatureAt (index);
+            };
+
+            const auto first = meterAt (28.0), second = meterAt (56.0 + 16.0), third = meterAt (56.0 + 32.0 + 28.0);
+            check (first == "7/4" && second == "4/4" && third == "7/4",
+                   "meter change 7/4 -> 4/4 -> 7/4: detected " + first + " -> " + second + " -> " + third);
+        }
+    }
 }
 
 int main()
@@ -487,6 +528,7 @@ int main()
     testMetronome();
     testChordAnalysis();
     testSlashChords();
+    testMeters();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

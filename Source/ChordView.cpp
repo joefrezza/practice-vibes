@@ -139,7 +139,8 @@ void ChordView::paint (juce::Graphics& g)
     // Footer -------------------------------------------------------------------
     g.setColour (juce::Colours::white.withAlpha (0.35f));
     g.setFont (juce::FontOptions (12.0f));
-    g.drawText ("Key " + track->keyName (transpose) + "  |  ~" + juce::String (juce::roundToInt (track->bpm)) + " bpm"
+    g.drawText ("Key " + track->keyName (transpose) + "  |  ~" + juce::String (juce::roundToInt (track->bpm)) + " bpm  |  "
+                    + track->timeSignatureAt (juce::jmax (0, beatIndex)) + (track->hasMeterChanges() ? " (changes)" : "")
                     + "  |  detected automatically, may contain mistakes",
                 footer, juce::Justification::centredLeft, true);
 }

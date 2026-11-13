@@ -5,10 +5,19 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <numeric>
 
 namespace pv
 {
+
+// Tuning parameters (the developer tool can override them).
+bool chordAnalyzerDebug = false;   // developer tool only: prints per-beat details
+float slashBassRatio = 1.25f;      // how much stronger than the root a bass note must be to make a slash chord
+float meterMargin = 0.02f;         // per-beat score advantage a meter needs over 4/4
+float riffWeight = 2.0f;           // weight of "the music repeats after one bar" evidence for the meter
+float meterSwitchCost = 2.0f;      // cost of changing meter between bars
+
 
 //==============================================================================
 int ChordTrack::chordIndexAt (double seconds) const
@@ -470,13 +479,219 @@ namespace
         static ChordTrack::Quality qualityOf (int state)    { return (ChordTrack::Quality) (state == numStates - 1 ? 0 : state / 12); }
     };
 
+    /** Like barViterbi, but the meter is part of the state and may change at a bar line
+        (at a cost), so songs that switch e.g. between 7 and 4 get both right.
+        `meterEvidence[i][k]` is added for beat i while in meters[k].
+    */
+    template <size_t F>
+    void multiMeterViterbi (const std::vector<std::array<float, F>>& emission, const std::vector<int>& meters,
+                            const std::vector<std::vector<float>>& meterEvidence,
+                            std::vector<int>& familyPath, std::vector<int>& positionPath, std::vector<int>& meterPath)
+    {
+        const auto numBeats = (int) emission.size();
+        familyPath.assign ((size_t) numBeats, (int) F - 1);
+        positionPath.assign ((size_t) numBeats, 0);
+        meterPath.assign ((size_t) numBeats, meters.empty() ? 4 : meters.front());
+
+        if (numBeats == 0 || meters.empty())
+            return;
+
+        // Slots enumerate (meter, position).
+        struct Slot { int meterIndex, position, previous; float changePenalty; };
+        std::vector<Slot> slots;
+        std::vector<int> firstSlot;
+
+        for (int k = 0; k < (int) meters.size(); ++k)
+        {
+            const auto m = meters[(size_t) k];
+            firstSlot.push_back ((int) slots.size());
+
+            for (int position = 0; position < m; ++position)
+            {
+                auto penalty = position == 0 ? 0.35f : 1.1f;
+
+                if (m % 2 == 0 && position == m / 2)
+                    penalty = 0.6f;
+
+                slots.push_back ({ k, position, 0, penalty });
+            }
+        }
+
+        for (auto& slot : slots)
+        {
+            const auto m = meters[(size_t) slot.meterIndex];
+            slot.previous = firstSlot[(size_t) slot.meterIndex] + (slot.position + m - 1) % m;
+        }
+
+        const auto numSlots = (int) slots.size();
+        const auto numStates = (int) F * numSlots;
+        const auto numMeters = (int) meters.size();
+        constexpr float phaseJump = 0.8f;
+        const auto meterSwitch = meterSwitchCost;
+
+        std::vector<double> delta ((size_t) numStates), next ((size_t) numStates);
+        std::vector<int> from ((size_t) numBeats * (size_t) numStates, -1);
+
+        for (int f = 0; f < (int) F; ++f)
+            for (int sl = 0; sl < numSlots; ++sl)
+                delta[(size_t) (f * numSlots + sl)] = emission[0][(size_t) f] + meterEvidence[0][(size_t) slots[(size_t) sl].meterIndex]
+                                                       - (slots[(size_t) sl].position == 0 ? 0.0 : 0.01);
+
+        std::vector<double> bestAtSlot ((size_t) numSlots), bestFamilyMeter ((size_t) F * (size_t) numMeters), bestMeter ((size_t) numMeters),
+                            bestBarEndFamily (F);
+        std::vector<int> argAtSlot ((size_t) numSlots), argFamilyMeter ((size_t) F * (size_t) numMeters), argMeter ((size_t) numMeters),
+                         argBarEndFamily (F);
+
+        for (int i = 1; i < numBeats; ++i)
+        {
+            std::fill (bestAtSlot.begin(), bestAtSlot.end(), -1.0e30);
+            std::fill (bestFamilyMeter.begin(), bestFamilyMeter.end(), -1.0e30);
+            std::fill (bestMeter.begin(), bestMeter.end(), -1.0e30);
+            std::fill (bestBarEndFamily.begin(), bestBarEndFamily.end(), -1.0e30);
+            auto bestBarEnd = -1.0e30;
+            auto argBarEnd = 0;
+
+            for (int f = 0; f < (int) F; ++f)
+            {
+                for (int sl = 0; sl < numSlots; ++sl)
+                {
+                    const auto state = f * numSlots + sl;
+                    const auto d = delta[(size_t) state];
+                    const auto& slot = slots[(size_t) sl];
+                    const auto fm = (size_t) (f * numMeters + slot.meterIndex);
+
+                    if (d > bestAtSlot[(size_t) sl])                    { bestAtSlot[(size_t) sl] = d; argAtSlot[(size_t) sl] = state; }
+                    if (d > bestFamilyMeter[fm])                         { bestFamilyMeter[fm] = d; argFamilyMeter[fm] = state; }
+                    if (d > bestMeter[(size_t) slot.meterIndex])         { bestMeter[(size_t) slot.meterIndex] = d; argMeter[(size_t) slot.meterIndex] = state; }
+
+                    if (slot.position == meters[(size_t) slot.meterIndex] - 1)
+                    {
+                        if (d > bestBarEndFamily[(size_t) f])            { bestBarEndFamily[(size_t) f] = d; argBarEndFamily[(size_t) f] = state; }
+                        if (d > bestBarEnd)                              { bestBarEnd = d; argBarEnd = state; }
+                    }
+                }
+            }
+
+            auto* back = from.data() + (size_t) i * (size_t) numStates;
+
+            for (int f = 0; f < (int) F; ++f)
+            {
+                for (int sl = 0; sl < numSlots; ++sl)
+                {
+                    const auto& slot = slots[(size_t) sl];
+                    const auto stay = f * numSlots + slot.previous;
+                    const auto fm = (size_t) (f * numMeters + slot.meterIndex);
+
+                    auto best = delta[(size_t) stay];
+                    auto arg = stay;
+
+                    auto consider = [&best, &arg] (double value, int origin)
+                    {
+                        if (value > best)
+                        {
+                            best = value;
+                            arg = origin;
+                        }
+                    };
+
+                    consider (bestAtSlot[(size_t) slot.previous] - slot.changePenalty, argAtSlot[(size_t) slot.previous]);
+                    consider (bestFamilyMeter[fm] - phaseJump, argFamilyMeter[fm]);
+                    consider (bestMeter[(size_t) slot.meterIndex] - phaseJump - slot.changePenalty, argMeter[(size_t) slot.meterIndex]);
+
+                    if (slot.position == 0)
+                    {
+                        consider (bestBarEndFamily[(size_t) f] - meterSwitch, argBarEndFamily[(size_t) f]);
+                        consider (bestBarEnd - meterSwitch - slot.changePenalty, argBarEnd);
+                    }
+
+                    next[(size_t) (f * numSlots + sl)] = best + emission[(size_t) i][(size_t) f]
+                                                         + meterEvidence[(size_t) i][(size_t) slot.meterIndex];
+                    back[f * numSlots + sl] = arg;
+                }
+            }
+
+            std::swap (delta, next);
+        }
+
+        auto state = (int) std::distance (delta.begin(), std::max_element (delta.begin(), delta.end()));
+
+        for (int i = numBeats - 1; i >= 0; --i)
+        {
+            const auto& slot = slots[(size_t) (state % numSlots)];
+            familyPath[(size_t) i] = state / numSlots;
+            positionPath[(size_t) i] = slot.position;
+            meterPath[(size_t) i] = meters[(size_t) slot.meterIndex];
+
+            if (i > 0)
+                state = from[(size_t) i * (size_t) numStates + (size_t) state];
+        }
+    }
+
+    /** How strongly the music repeats itself after `lag` beats, compared with the
+        neighbouring lags, averaged over a window around each beat. Positive only. */
+    std::vector<std::vector<float>> riffEvidence (const std::vector<std::array<float, 12>>& treble,
+                                                  const std::vector<std::array<float, 12>>& bass,
+                                                  const std::vector<int>& meters, int halfWindow)
+    {
+        const auto n = (int) treble.size();
+        const auto maxLag = *std::max_element (meters.begin(), meters.end()) + 1;
+        std::vector<std::vector<double>> prefix ((size_t) maxLag + 1, std::vector<double> ((size_t) n + 1, 0.0));
+
+        for (int lag = 1; lag <= maxLag; ++lag)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                auto similarity = 0.0;
+
+                if (i + lag < n)
+                {
+                    auto dot = 0.0, na = 0.0, nb = 0.0;
+
+                    for (size_t c = 0; c < 12; ++c)
+                    {
+                        const double a1 = bass[(size_t) i][c], b1 = bass[(size_t) (i + lag)][c];
+                        const double a2 = treble[(size_t) i][c], b2 = treble[(size_t) (i + lag)][c];
+                        dot += a1 * b1 + a2 * b2;
+                        na += a1 * a1 + a2 * a2;
+                        nb += b1 * b1 + b2 * b2;
+                    }
+
+                    similarity = dot / std::sqrt (na * nb + 1.0e-12);
+                }
+
+                prefix[(size_t) lag][(size_t) i + 1] = prefix[(size_t) lag][(size_t) i] + similarity;
+            }
+        }
+
+        std::vector<std::vector<float>> evidence ((size_t) n, std::vector<float> (meters.size(), 0.0f));
+
+        for (int i = 0; i < n; ++i)
+        {
+            auto windowMean = [&] (int lag)
+            {
+                const auto first = juce::jmax (0, i - halfWindow);
+                const auto last = juce::jmin (n - lag, i + halfWindow + 1);   // pairs (j, j + lag) must exist
+                return last > first ? (prefix[(size_t) lag][(size_t) last] - prefix[(size_t) lag][(size_t) first]) / (last - first) : 0.0;
+            };
+
+            for (size_t k = 0; k < meters.size(); ++k)
+            {
+                const auto m = meters[k];
+                const auto peak = windowMean (m) - juce::jmax (windowMean (m - 1), windowMean (m + 1));
+                evidence[(size_t) i][k] = (float) juce::jmax (0.0, peak);
+            }
+        }
+
+        return evidence;
+    }
+
     /** Viterbi over (chord family, position in bar). The position advances by one each beat;
         changing chord costs least on the downbeat. A costly "phase jump" lets the bar grid
         recover where the beat tracker added or dropped a beat.
     */
     template <size_t F>
-    void barViterbi (const std::vector<std::array<float, F>>& emission, int beatsPerBar,
-                     std::vector<int>& familyPath, std::vector<int>& positionPath)
+    double barViterbi (const std::vector<std::array<float, F>>& emission, int beatsPerBar,
+                       std::vector<int>& familyPath, std::vector<int>& positionPath)
     {
         const auto numBeats = (int) emission.size();
         const auto P = beatsPerBar;
@@ -485,7 +700,7 @@ namespace
         positionPath.assign ((size_t) numBeats, 0);
 
         if (numBeats == 0)
-            return;
+            return 0.0;
 
         std::vector<float> changePenalty ((size_t) P, 1.1f);
         changePenalty[0] = 0.35f;
@@ -564,6 +779,7 @@ namespace
         }
 
         auto state = (int) std::distance (delta.begin(), std::max_element (delta.begin(), delta.end()));
+        const auto total = delta[(size_t) state];
 
         for (int i = numBeats - 1; i >= 0; --i)
         {
@@ -573,6 +789,8 @@ namespace
             if (i > 0)
                 state = from[(size_t) i * (size_t) numStates + (size_t) state];
         }
+
+        return total;
     }
 
     int estimateKey (const std::array<double, 12>& chroma, bool& isMinor)
@@ -627,8 +845,6 @@ namespace
 }
 
 //==============================================================================
-bool chordAnalyzerDebug = false;   // developer tool only: prints per-beat details
-float slashBassRatio = 1.25f;      // how much stronger than the root a bass note must be to make a slash chord
 
 ChordTrack analyseChords (const float* mono, int numSamples, double sampleRate, const std::atomic<bool>* cancel)
 {
@@ -747,95 +963,10 @@ ChordTrack analyseChords (const float* mono, int numSamples, double sampleRate, 
         }
     }
 
-    // --- Beat-synchronous features ---------------------------------------------
-    const auto numBeats = (int) track.beats.size();
-    std::vector<std::array<float, 12>> beatTreble ((size_t) numBeats), beatBass ((size_t) numBeats);
-    std::vector<float> beatEnergy ((size_t) numBeats);
-    const auto framesPerSecond = rate / hop;
-
-    for (int i = 0; i < numBeats; ++i)
-    {
-        const auto start = track.beats[(size_t) i];
-        const auto end = i + 1 < numBeats ? track.beats[(size_t) i + 1] : lengthSeconds;
-        auto first = (int) std::ceil (start * framesPerSecond);
-        auto last = (int) std::ceil (end * framesPerSecond);   // exclusive
-        first = juce::jlimit (0, spec.numFrames - 1, first);
-        last = juce::jlimit (first + 1, spec.numFrames, last);
-
-        beatTreble[(size_t) i].fill (0.0f);
-        beatBass[(size_t) i].fill (0.0f);
-        auto energy = 0.0f;
-
-        for (int k = first; k < last; ++k)
-        {
-            for (size_t c = 0; c < 12; ++c)
-            {
-                beatTreble[(size_t) i][c] += treble[(size_t) k][c];
-                beatBass[(size_t) i][c] += bass[(size_t) k][c];
-            }
-
-            energy += frameEnergy[(size_t) k];
-        }
-
-        beatEnergy[(size_t) i] = energy / (float) (last - first);
-    }
-
-    std::vector<float> sortedEnergy (beatEnergy);
-    std::sort (sortedEnergy.begin(), sortedEnergy.end());
-    const auto medianEnergy = juce::jmax (1.0e-9f, sortedEnergy[sortedEnergy.size() / 2]);
-
-    // --- Emissions ------------------------------------------------------------
+    // --- Beat-synchronous features and chord scores, for a given beat grid ----
     static const ChordModel model;
     constexpr auto S = ChordModel::numStates;
-    std::vector<std::array<float, S>> emission ((size_t) numBeats);
-    std::array<double, 12> keyChroma {};
-
-    for (int i = 0; i < numBeats; ++i)
-    {
-        auto t = beatTreble[(size_t) i];
-        const auto norm = centreAndNormalise (t);
-        const auto silent = norm <= 1.0e-6f || beatEnergy[(size_t) i] < 0.05f * medianEnergy;
-
-        const auto& b = beatBass[(size_t) i];
-        const auto bassMax = juce::jmax (1.0e-6f, *std::max_element (b.begin(), b.end()));
-
-        for (int s = 0; s < S - 1; ++s)
-        {
-            if (silent)
-            {
-                emission[(size_t) i][(size_t) s] = 0.0f;
-                continue;
-            }
-
-            const auto& tpl = model.templates[(size_t) s];
-            auto similarity = 0.0f;
-
-            for (size_t c = 0; c < 12; ++c)
-                similarity += t[c] * tpl[c];
-
-            // Bass on the root supports a chord; bass on its third or fifth (an inversion) a little.
-            const auto root = ChordModel::rootOf (s);
-            auto bassTerm = b[(size_t) root];
-
-            for (auto interval : chordIntervals()[(size_t) ChordModel::qualityOf (s)])
-                if (interval == 3 || interval == 4 || interval == 7)
-                    bassTerm = juce::jmax (bassTerm, 0.35f * b[(size_t) ((root + interval) % 12)]);
-
-            bassTerm /= bassMax;
-            emission[(size_t) i][(size_t) s] = similarity + 0.12f * bassTerm - model.qualityPenalty[(size_t) ChordModel::qualityOf (s)];
-        }
-
-        emission[(size_t) i][(size_t) (S - 1)] = silent ? 1.0f : 0.25f;
-
-        if (! silent)
-            for (size_t c = 0; c < 12; ++c)
-                keyChroma[c] += beatTreble[(size_t) i][c] / norm;
-    }
-
-    // Smoothing runs over chord families (root + major/minor, or no chord); the exact
-    // quality (7, maj7, 5...) is picked afterwards per segment, so it can't fragment chords.
     constexpr size_t F = 25;
-    std::vector<std::array<float, F>> familyEmission ((size_t) numBeats);
 
     auto familyMembers = [] (int family)
     {
@@ -845,20 +976,242 @@ ChordTrack analyseChords (const float* mono, int numSamples, double sampleRate, 
         return std::vector<Q>();
     };
 
-    for (int i = 0; i < numBeats; ++i)
+    struct BeatFeatures
     {
-        for (int f = 0; f < (int) F - 1; ++f)
+        std::vector<std::array<float, 12>> treble, bass;
+        std::vector<float> energy;
+        float medianEnergy = 1.0f;
+        std::vector<std::array<float, S>> emission;
+        std::vector<std::array<float, F>> family;
+        std::array<double, 12> keyChroma {};
+    };
+
+    auto computeFeatures = [&] (const std::vector<double>& beats)
+    {
+        BeatFeatures f;
+        const auto numBeats = (int) beats.size();
+        auto& beatTreble = f.treble;
+        auto& beatBass = f.bass;
+        beatTreble.resize ((size_t) numBeats);
+        beatBass.resize ((size_t) numBeats);
+        auto& beatEnergy = f.energy;
+        beatEnergy.resize ((size_t) numBeats);
+        const auto framesPerSecond = rate / hop;
+
+        for (int i = 0; i < numBeats; ++i)
         {
-            auto best = -1.0e9f;
+            const auto start = beats[(size_t) i];
+            const auto end = i + 1 < numBeats ? beats[(size_t) i + 1] : lengthSeconds;
+            auto first = (int) std::ceil (start * framesPerSecond);
+            auto last = (int) std::ceil (end * framesPerSecond);   // exclusive
+            first = juce::jlimit (0, spec.numFrames - 1, first);
+            last = juce::jlimit (first + 1, spec.numFrames, last);
 
-            for (auto q : familyMembers (f))
-                best = juce::jmax (best, emission[(size_t) i][(size_t) (q * 12 + f % 12)]);
+            beatTreble[(size_t) i].fill (0.0f);
+            beatBass[(size_t) i].fill (0.0f);
+            auto energy = 0.0f;
 
-            familyEmission[(size_t) i][(size_t) f] = best;
+            for (int k = first; k < last; ++k)
+            {
+                for (size_t c = 0; c < 12; ++c)
+                {
+                    beatTreble[(size_t) i][c] += treble[(size_t) k][c];
+                    beatBass[(size_t) i][c] += bass[(size_t) k][c];
+                }
+
+                energy += frameEnergy[(size_t) k];
+            }
+
+            beatEnergy[(size_t) i] = energy / (float) (last - first);
         }
 
-        familyEmission[(size_t) i][F - 1] = emission[(size_t) i][(size_t) (S - 1)];
+        std::vector<float> sortedEnergy (beatEnergy);
+        std::sort (sortedEnergy.begin(), sortedEnergy.end());
+        f.medianEnergy = juce::jmax (1.0e-9f, sortedEnergy[sortedEnergy.size() / 2]);
+        const auto medianEnergy = f.medianEnergy;
+
+        auto& emission = f.emission;
+        auto& keyChroma = f.keyChroma;
+        emission.resize ((size_t) numBeats);
+
+        for (int i = 0; i < numBeats; ++i)
+        {
+            auto t = beatTreble[(size_t) i];
+            const auto norm = centreAndNormalise (t);
+            const auto silent = norm <= 1.0e-6f || beatEnergy[(size_t) i] < 0.05f * medianEnergy;
+
+            const auto& b = beatBass[(size_t) i];
+            const auto bassMax = juce::jmax (1.0e-6f, *std::max_element (b.begin(), b.end()));
+
+            for (int s = 0; s < S - 1; ++s)
+            {
+                if (silent)
+                {
+                    emission[(size_t) i][(size_t) s] = 0.0f;
+                    continue;
+                }
+
+                const auto& tpl = model.templates[(size_t) s];
+                auto similarity = 0.0f;
+
+                for (size_t c = 0; c < 12; ++c)
+                    similarity += t[c] * tpl[c];
+
+                // Bass on the root supports a chord; bass on its third or fifth (an inversion) a little.
+                const auto root = ChordModel::rootOf (s);
+                auto bassTerm = b[(size_t) root];
+
+                for (auto interval : chordIntervals()[(size_t) ChordModel::qualityOf (s)])
+                    if (interval == 3 || interval == 4 || interval == 7)
+                        bassTerm = juce::jmax (bassTerm, 0.35f * b[(size_t) ((root + interval) % 12)]);
+
+                bassTerm /= bassMax;
+                emission[(size_t) i][(size_t) s] = similarity + 0.12f * bassTerm - model.qualityPenalty[(size_t) ChordModel::qualityOf (s)];
+            }
+
+            emission[(size_t) i][(size_t) (S - 1)] = silent ? 1.0f : 0.25f;
+
+            if (! silent)
+                for (size_t c = 0; c < 12; ++c)
+                    keyChroma[c] += beatTreble[(size_t) i][c] / norm;
+        }
+
+        // Smoothing runs over chord families (root + major/minor, or no chord); the exact
+        // quality (7, maj7, 5...) is picked afterwards per segment, so it can't fragment chords.
+        auto& familyEmission = f.family;
+        familyEmission.resize ((size_t) numBeats);
+
+        for (int i = 0; i < numBeats; ++i)
+        {
+            for (int fam = 0; fam < (int) F - 1; ++fam)
+            {
+                auto best = -1.0e9f;
+
+                for (auto q : familyMembers (fam))
+                    best = juce::jmax (best, emission[(size_t) i][(size_t) (q * 12 + fam % 12)]);
+
+                familyEmission[(size_t) i][(size_t) fam] = best;
+            }
+
+            familyEmission[(size_t) i][F - 1] = emission[(size_t) i][(size_t) (S - 1)];
+        }
+
+        return f;
+    };
+
+    auto features = computeFeatures (track.beats);
+
+    if (cancelled (cancel))
+        return {};
+
+    // --- Meter -----------------------------------------------------------------
+    // The meter is the bar length whose grid explains the chord changes best; anything
+    // other than 4 must win clearly, as shorter bars offer more cheap change points.
+    // Odd meters in eighths (5/8, 7/8) are looked for on a grid at twice the tempo,
+    // against 8 eighths per bar.
+    std::vector<int> path;
+    {
+        juce::String scores = "meter scores:";
+
+        auto tryMeters = [&] (const BeatFeatures& f, int reference, std::initializer_list<int> meters,
+                              std::vector<int>& bestPath, std::vector<int>& bestPositions, int& bestMeter)
+        {
+            const auto beatCount = (int) f.family.size();
+            const auto referenceScore = barViterbi (f.family, reference, bestPath, bestPositions);
+            bestMeter = reference;
+            auto bestGain = 0.0;
+            scores << "  " << reference << "=" << juce::String (referenceScore, 1);
+
+            for (auto meter : meters)
+            {
+                std::vector<int> candidatePath, candidatePositions;
+                const auto score = barViterbi (f.family, meter, candidatePath, candidatePositions);
+                const auto gain = (score - referenceScore) / juce::jmax (1, beatCount);   // per beat
+                scores << "  " << meter << "=" << juce::String (gain, 4) << "/beat";
+
+                if (gain > meterMargin && gain > bestGain)
+                {
+                    bestGain = gain;
+                    bestMeter = meter;
+                    bestPath = std::move (candidatePath);
+                    bestPositions = std::move (candidatePositions);
+                }
+            }
+        };
+
+        {
+            const std::vector<int> meters { 4, 3, 5, 7 };
+            auto evidence = riffEvidence (features.treble, features.bass, meters, 12);
+
+            for (auto& beat : evidence)
+                for (size_t k = 0; k < meters.size(); ++k)
+                    beat[k] = riffWeight * beat[k] - (meters[k] == 4 ? 0.0f : meterMargin);
+
+            multiMeterViterbi (features.family, meters, evidence, path, track.beatPositions, track.beatMeters);
+
+            // The song's main meter: the one most beats are in.
+            std::map<int, int> counts;
+
+            for (auto m : track.beatMeters)
+                ++counts[m];
+
+            track.beatsPerBar = 4;
+
+            for (auto [m, count] : counts)
+                if (count > counts[track.beatsPerBar])
+                    track.beatsPerBar = m;
+
+            scores << " beats per meter:";
+
+            for (auto [m, count] : counts)
+                scores << " " << m << "=" << count;
+        }
+
+        const auto allFour = std::all_of (track.beatMeters.begin(), track.beatMeters.end(), [] (int m) { return m == 4; });
+
+        if (allFour && track.beats.size() > 8)
+        {
+            std::vector<double> eighths;
+
+            for (size_t i = 0; i < track.beats.size(); ++i)
+            {
+                const auto next = i + 1 < track.beats.size() ? track.beats[i + 1] : 2.0 * track.beats[i] - track.beats[i - 1];
+                eighths.push_back (track.beats[i]);
+
+                if (0.5 * (track.beats[i] + next) < lengthSeconds)
+                    eighths.push_back (0.5 * (track.beats[i] + next));
+            }
+
+            auto eighthFeatures = computeFeatures (eighths);
+            std::vector<int> eighthPath, eighthPositions;
+            auto eighthMeter = 8;
+            scores << "  | eighths:";
+            tryMeters (eighthFeatures, 8, { 5, 7 }, eighthPath, eighthPositions, eighthMeter);
+
+            if (eighthMeter != 8)
+            {
+                track.beats = std::move (eighths);
+                track.bpm *= 2.0;
+                track.beatUnit = 8;
+                track.beatsPerBar = eighthMeter;
+                track.beatPositions = std::move (eighthPositions);
+                track.beatMeters.assign (track.beats.size(), eighthMeter);
+                path = std::move (eighthPath);
+                features = std::move (eighthFeatures);
+            }
+        }
+
+        if (chordAnalyzerDebug)
+            std::puts (scores.toRawUTF8());
     }
+
+    const auto numBeats = (int) track.beats.size();
+    const auto& beatTreble = features.treble;
+    const auto& beatBass = features.bass;
+    const auto& beatEnergy = features.energy;
+    const auto medianEnergy = features.medianEnergy;
+    const auto& emission = features.emission;
+    const auto& keyChroma = features.keyChroma;
 
     if (chordAnalyzerDebug)
     {
@@ -884,14 +1237,6 @@ ChordTrack analyseChords (const float* mono, int numSamples, double sampleRate, 
             std::puts (line.toRawUTF8());
         }
     }
-
-    if (cancelled (cancel))
-        return {};
-
-    // --- Smoothing: changes are cheap on the downbeat, dearer mid-bar. ---------
-    track.beatsPerBar = 4;
-    std::vector<int> path;
-    barViterbi (familyEmission, track.beatsPerBar, path, track.beatPositions);
 
     for (int i = 0; i < numBeats;)
     {

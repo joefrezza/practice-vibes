@@ -297,7 +297,7 @@ void WaveformView::paintChordLane (juce::Graphics& g, juce::Rectangle<int> area)
 
     // Faint bar lines through the waveform, when they are not too dense.
     const auto& beats = chords->beats;
-    const auto barPixels = 4.0 * (beats.size() > 1 ? (beats.back() - beats.front()) / (double) (beats.size() - 1) : 1.0)
+    const auto barPixels = chords->beatsPerBar * (beats.size() > 1 ? (beats.back() - beats.front()) / (double) (beats.size() - 1) : 1.0)
                                / viewLength * area.getWidth();
 
     if (barPixels > 12.0)

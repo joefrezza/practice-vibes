@@ -24,7 +24,9 @@ struct ChordTrack
     std::vector<Chord> chords;          // consecutive, covering the song
     std::vector<double> beats;          // beat times
     std::vector<int> beatPositions;     // per beat: position in its bar, 0 = downbeat
-    int beatsPerBar = 4;
+    std::vector<int> beatMeters;        // per beat: beats in its bar (the meter can change)
+    int beatsPerBar = 4;                // main meter of the song
+    int beatUnit = 4;                   // 4: beats are quarter notes; 8: eighth notes (5/8, 7/8)
     double bpm = 0.0;
     double tuningCents = 0.0;           // deviation of the recording from A = 440 Hz
     int keyRoot = 0;                    // estimated key, for sharp/flat spelling
@@ -41,6 +43,21 @@ struct ChordTrack
     /** Chord name, transposed by `semitones`, spelled with flats or sharps to suit the (transposed) key. */
     juce::String chordName (const Chord&, int semitones = 0) const;
     juce::String keyName (int semitones = 0) const;
+
+    juce::String timeSignature() const      { return juce::String (beatsPerBar) + "/" + juce::String (beatUnit); }
+
+    /** Time signature of the bar containing the given beat. */
+    juce::String timeSignatureAt (int beatIndex) const
+    {
+        const auto meter = beatIndex >= 0 && beatIndex < (int) beatMeters.size() ? beatMeters[(size_t) beatIndex] : beatsPerBar;
+        return juce::String (meter) + "/" + juce::String (beatUnit);
+    }
+
+    /** True if the meter changes somewhere in the song. */
+    bool hasMeterChanges() const
+    {
+        return std::any_of (beatMeters.begin(), beatMeters.end(), [this] (int m) { return m != beatsPerBar; });
+    }
 
     static juce::String noteName (int pitchClass, bool flats);
     static const char* qualitySuffix (Quality);

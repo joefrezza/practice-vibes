@@ -6,7 +6,7 @@
 
 #include <iostream>
 
-namespace pv { extern bool chordAnalyzerDebug; extern float slashBassRatio; }
+namespace pv { extern bool chordAnalyzerDebug; extern float slashBassRatio; extern float meterMargin; extern float riffWeight; extern float meterSwitchCost; }
 
 namespace
 {
@@ -44,7 +44,7 @@ namespace
         std::cout << "=== " << file.getFileName() << "  (" << formatTime (length / reader->sampleRate) << ", analysed in "
                   << juce::roundToInt (elapsed) << " ms)" << std::endl
                   << "tempo " << juce::String (track.bpm, 1) << " bpm, tuning " << juce::String (track.tuningCents, 1)
-                  << " cents, key " << track.keyName() << std::endl;
+                  << " cents, key " << track.keyName() << ", " << track.timeSignature() << std::endl;
 
         if (pv::chordAnalyzerDebug)
         {
@@ -54,6 +54,23 @@ namespace
                 positions << p;
 
             std::cout << "positions " << positions << std::endl;
+        }
+
+        {
+            auto problems = 0;
+            for (size_t k = 0; k < track.chords.size(); ++k)
+            {
+                const auto& c = track.chords[k];
+                const auto gap = k > 0 && track.chords[k - 1].startBeat + track.chords[k - 1].numBeats != c.startBeat;
+                if (c.numBeats < 1 || c.end <= c.start || gap)
+                {
+                    ++problems;
+                    std::cout << "BAD chord " << (int) k << " " << track.chordName (c) << " beats " << c.startBeat << "+" << c.numBeats
+                              << " time " << c.start << "-" << c.end << std::endl;
+                }
+            }
+            if (problems > 0)
+                std::cout << problems << " inconsistent chord(s)" << std::endl;
         }
 
         // One line per bar: chords with their beat counts.
@@ -70,7 +87,8 @@ namespace
                         std::cout << line << std::endl;
 
                     ++bar;
-                    line = juce::String (bar).paddedLeft (' ', 4) + "  " + formatTime (track.beats[(size_t) b]).paddedLeft (' ', 7) + " |";
+                    line = juce::String (bar).paddedLeft (' ', 4) + "  " + formatTime (track.beats[(size_t) b]).paddedLeft (' ', 7)
+                           + " " + track.timeSignatureAt (b).paddedRight (' ', 4) + "|";
 
                     for (int k = 0; k < track.beatPositions[(size_t) b]; ++k)
                         line += "      ";
@@ -102,6 +120,12 @@ int main (int argc, char* argv[])
     for (int i = 1; i < argc; ++i)
         if (juce::String (argv[i]) == "--debug")
             pv::chordAnalyzerDebug = true;
+        else if (juce::String (argv[i]).startsWith ("--switch="))
+            pv::meterSwitchCost = juce::String (argv[i]).fromFirstOccurrenceOf ("=", false, false).getFloatValue();
+        else if (juce::String (argv[i]).startsWith ("--riff="))
+            pv::riffWeight = juce::String (argv[i]).fromFirstOccurrenceOf ("=", false, false).getFloatValue();
+        else if (juce::String (argv[i]).startsWith ("--meter="))
+            pv::meterMargin = juce::String (argv[i]).fromFirstOccurrenceOf ("=", false, false).getFloatValue();
         else if (juce::String (argv[i]).startsWith ("--slash="))
             pv::slashBassRatio = juce::String (argv[i]).fromFirstOccurrenceOf ("=", false, false).getFloatValue();
 
