@@ -1,0 +1,491 @@
+#include "LooperPanel.h"
+#include "AppPaths.h"
+#include "Theme.h"
+
+namespace pv
+{
+
+namespace
+{
+    const juce::Colour recordColour  { 0xffd64545 };
+    const juce::Colour armedColour   { 0xffe0a030 };
+    const juce::Colour playColour    { 0xff3f9e5a };
+    const juce::Colour overdubColour { 0xffb455c8 };
+
+    void styleLabel (juce::Label& label, const juce::String& text, float alpha = 0.85f)
+    {
+        label.setText (text, juce::dontSendNotification);
+        label.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (alpha));
+    }
+}
+
+//==============================================================================
+/** Beat dots for the current bar (same look as the Practice tab's). */
+class LooperPanel::BeatDots final : public juce::Component
+{
+public:
+    explicit BeatDots (MetronomeProcessor& m) : metronome (m) {}
+
+    void update()
+    {
+        const auto beat = metronome.isRunning() ? metronome.getCurrentBeat() : -1;
+        const auto beats = beat >= 0 ? metronome.getCurrentBeatsPerBar() : metronome.beatsPerBar.load();
+
+        if (beat != lastBeat || beats != lastBeats)
+        {
+            lastBeat = beat;
+            lastBeats = beats;
+            repaint();
+        }
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        const auto beats = juce::jmax (1, lastBeats);
+        const auto size = juce::jmin ((float) getHeight(), (float) getWidth() / (float) beats - 6.0f);
+
+        for (int i = 0; i < beats; ++i)
+        {
+            const auto x = (float) i * ((float) getWidth() / (float) beats);
+            auto circle = juce::Rectangle<float> (x, 0.0f, size, size).withY (((float) getHeight() - size) * 0.5f);
+            g.setColour (i == lastBeat ? (i == 0 ? theme::highlight : theme::accent.brighter (0.4f))
+                                       : juce::Colours::white.withAlpha (0.12f));
+            g.fillEllipse (circle.reduced (2.0f));
+        }
+    }
+
+private:
+    MetronomeProcessor& metronome;
+    int lastBeat = -1, lastBeats = 4;
+};
+
+//==============================================================================
+/** One track: the pedal button, mute, clear, volume, and a loop progress bar. */
+class LooperPanel::TrackRow final : public juce::Component
+{
+public:
+    TrackRow (Looper& l, int index) : looper (l), track (index)
+    {
+        nameLabel.setText (juce::String (track + 1), juce::dontSendNotification);
+        nameLabel.setFont (juce::FontOptions (26.0f).withStyle ("Bold"));
+        nameLabel.setJustificationType (juce::Justification::centred);
+        nameLabel.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.7f));
+        addAndMakeVisible (nameLabel);
+
+        pedalButton.onClick = [this] { looper.pressTrack (track); };
+        pedalButton.setTooltip ("Record, then overdub / play (key " + juce::String (track + 1) + ")");
+        addAndMakeVisible (pedalButton);
+
+        muteButton.onClick = [this] { looper.toggleMute (track); };
+        addAndMakeVisible (muteButton);
+
+        clearButton.onClick = [this] { looper.clearTrack (track); };
+        addAndMakeVisible (clearButton);
+
+        volumeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+        volumeSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 24);
+        volumeSlider.setRange (-40.0, 6.0, 0.5);
+        volumeSlider.setTextValueSuffix (" dB");
+        volumeSlider.setValue (juce::Decibels::gainToDecibels (looper.getGain (track)), juce::dontSendNotification);
+        volumeSlider.setDoubleClickReturnValue (true, 0.0);
+        volumeSlider.onValueChange = [this]
+        {
+            looper.setTrackGain (track, juce::Decibels::decibelsToGain ((float) volumeSlider.getValue(), -40.0f));
+        };
+        addAndMakeVisible (volumeSlider);
+    }
+
+    void update()
+    {
+        const auto state = looper.getState (track);
+        const auto muted = looper.isMuted (track);
+        const auto bars = looper.getBars (track);
+        const auto position = looper.getPosition (track);
+        const auto peak = looper.takePeak (track);
+
+        juce::String text;
+        juce::Colour colour;
+
+        switch (state)
+        {
+            case Looper::State::empty:       text = "Record";                                   colour = theme::panel.brighter (0.25f); break;
+            case Looper::State::armed:       text = "Waiting for bar line...";                  colour = armedColour;   break;
+            case Looper::State::recording:   text = "Recording - tap to stop";                  colour = recordColour;  break;
+            case Looper::State::playing:     text = muted ? "Muted - tap to play" : "Playing - tap to overdub";
+                                             colour = muted ? theme::panel.brighter (0.4f) : playColour; break;
+            case Looper::State::overdubbing: text = "Overdubbing - tap to stop";                colour = overdubColour; break;
+        }
+
+        pedalButton.setButtonText (text);
+        pedalButton.setColour (juce::TextButton::buttonColourId, colour);
+        muteButton.setButtonText (muted ? "Unmute" : "Mute");
+        muteButton.setEnabled (state == Looper::State::playing || state == Looper::State::overdubbing);
+        clearButton.setEnabled (state != Looper::State::empty);
+
+        const auto level = juce::jmax (peak, meterLevel * 0.85f);
+
+        if (state != lastState || bars != lastBars || std::abs (position - lastPosition) > 0.002f
+            || muted != lastMuted || std::abs (level - meterLevel) > 0.01f)
+        {
+            lastState = state;
+            lastBars = bars;
+            lastPosition = position;
+            lastMuted = muted;
+            meterLevel = level;
+            repaint (progressArea);
+        }
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (theme::panel);
+        g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (1.0f), 6.0f);
+
+        auto area = progressArea.toFloat();
+        g.setColour (juce::Colours::black.withAlpha (0.35f));
+        g.fillRoundedRectangle (area, 4.0f);
+
+        const auto colour = lastState == Looper::State::recording   ? recordColour
+                          : lastState == Looper::State::overdubbing ? overdubColour
+                          : lastState == Looper::State::armed       ? armedColour
+                          : lastMuted                               ? juce::Colours::grey
+                                                                    : playColour;
+
+        if (lastPosition >= 0.0f)
+        {
+            g.setColour (colour.withAlpha (0.55f));
+            g.fillRoundedRectangle (area.withWidth (area.getWidth() * juce::jlimit (0.0f, 1.0f, lastPosition)), 4.0f);
+        }
+
+        if (lastBars > 1 && lastState != Looper::State::recording)
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.25f));
+
+            for (int b = 1; b < lastBars; ++b)
+            {
+                const auto x = area.getX() + area.getWidth() * (float) b / (float) lastBars;
+                g.drawVerticalLine (juce::roundToInt (x), area.getY() + 3.0f, area.getBottom() - 3.0f);
+            }
+        }
+
+        // Output level along the bottom edge
+        g.setColour (juce::Colours::white.withAlpha (0.5f));
+        g.fillRect (area.removeFromBottom (3.0f).withWidth (area.getWidth() * juce::jlimit (0.0f, 1.0f, meterLevel)));
+
+        juce::String info;
+
+        if (lastState == Looper::State::empty)
+            info = "empty";
+        else if (lastState == Looper::State::armed)
+            info = "starts on the next bar line";
+        else if (lastState == Looper::State::recording)
+            info = lastBars > 0 ? "bar " + juce::String (lastBars) : juce::String();
+        else
+            info = juce::String (lastBars) + (lastBars == 1 ? " bar" : " bars");
+
+        g.setColour (juce::Colours::white.withAlpha (0.85f));
+        g.setFont (juce::FontOptions (15.0f));
+        g.drawText (info, progressArea.reduced (10, 0), juce::Justification::centredLeft);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (8, 6);
+        nameLabel.setBounds (area.removeFromLeft (36));
+        pedalButton.setBounds (area.removeFromLeft (juce::jmin (260, area.getWidth() / 3)).reduced (3));
+        clearButton.setBounds (area.removeFromRight (80).reduced (3));
+        muteButton.setBounds (area.removeFromRight (90).reduced (3));
+        volumeSlider.setBounds (area.removeFromRight (juce::jmin (280, area.getWidth() / 3)).reduced (3, 0).withSizeKeepingCentre (juce::jmin (280, area.getWidth() / 3) - 6, 32));
+        progressArea = area.reduced (8, 6);
+    }
+
+private:
+    Looper& looper;
+    const int track;
+
+    juce::Label nameLabel;
+    juce::TextButton pedalButton, muteButton { "Mute" }, clearButton { "Clear" };
+    juce::Slider volumeSlider;
+    juce::Rectangle<int> progressArea;
+
+    Looper::State lastState = Looper::State::empty;
+    int lastBars = 0;
+    float lastPosition = -1.0f, meterLevel = 0.0f;
+    bool lastMuted = false;
+};
+
+//==============================================================================
+LooperPanel::LooperPanel (AppEngine& e)
+    : engine (e), looper (*e.looper), metronome (*e.metronome)
+{
+    loadSettings();
+    setWantsKeyboardFocus (true);
+
+    header.setText ("Looper", juce::dontSendNotification);
+    header.setFont (theme::headerFont());
+    header.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.9f));
+    addAndMakeVisible (header);
+
+    styleLabel (sourceLabel, "Record");
+    addAndMakeVisible (sourceLabel);
+
+    for (auto* b : { &afterFxButton, &beforeFxButton })
+    {
+        b->setClickingTogglesState (true);
+        b->setRadioGroupId (1);
+        b->setColour (juce::TextButton::buttonOnColourId, theme::accent);
+        addAndMakeVisible (*b);
+    }
+
+    afterFxButton.setTooltip ("Record the guitar as you hear it, with the rig's effects.");
+    beforeFxButton.setTooltip ("Record the dry guitar; loops are played through the rig, so changing the tone changes them too.");
+    (looper.source.load() == (int) Looper::Source::beforeFx ? beforeFxButton : afterFxButton).setToggleState (true, juce::dontSendNotification);
+    afterFxButton.onClick = [this] { looper.source = (int) Looper::Source::afterFx; saveSettings(); };
+    beforeFxButton.onClick = [this] { looper.source = (int) Looper::Source::beforeFx; saveSettings(); };
+
+    styleLabel (lengthLabel, "Length");
+    addAndMakeVisible (lengthLabel);
+    lengthBox.addItem ("Free (stop on a bar line)", 100);
+
+    for (auto bars : { 1, 2, 3, 4, 6, 8, 12, 16 })
+        lengthBox.addItem (juce::String (bars) + (bars == 1 ? " bar" : " bars"), bars);
+
+    lengthBox.setSelectedId (looper.fixedBars.load() > 0 ? looper.fixedBars.load() : 100, juce::dontSendNotification);
+    lengthBox.onChange = [this]
+    {
+        const auto id = lengthBox.getSelectedId();
+        looper.fixedBars = id == 100 ? 0 : id;
+        saveSettings();
+    };
+    addAndMakeVisible (lengthBox);
+
+    undoButton.onClick = [this] { looper.undo(); };
+    clearAllButton.onClick = [this] { looper.clearAll(); };
+    muteAllButton.onClick = [this]
+    {
+        bool anyPlaying = false;
+
+        for (int t = 0; t < Looper::numTracks; ++t)
+            anyPlaying = anyPlaying || (looper.getState (t) == Looper::State::playing && ! looper.isMuted (t));
+
+        for (int t = 0; t < Looper::numTracks; ++t)
+            if (looper.getState (t) == Looper::State::playing && looper.isMuted (t) != anyPlaying)
+                looper.toggleMute (t);
+    };
+
+    for (auto* b : { &undoButton, &clearAllButton, &muteAllButton, &metronomeButton })
+        addAndMakeVisible (*b);
+
+    // Metronome (shared with the Practice tab)
+    styleLabel (tempoLabel, "Tempo");
+    tempoSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    tempoSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 90, 26);
+    tempoSlider.setRange (30.0, 300.0, 1.0);
+    tempoSlider.setTextValueSuffix (" bpm");
+    tempoSlider.setValue (metronome.startBpm.load(), juce::dontSendNotification);
+    tempoSlider.onValueChange = [this]
+    {
+        metronome.startBpm = tempoSlider.getValue();
+        metronome.tempoChangedByUser();
+    };
+
+    styleLabel (beatsLabel, "Beats per bar");
+
+    for (int i = 1; i <= 12; ++i)
+        beatsBox.addItem (juce::String (i), i);
+
+    beatsBox.setSelectedId (metronome.beatsPerBar.load(), juce::dontSendNotification);
+    beatsBox.onChange = [this] { metronome.beatsPerBar = juce::jmax (1, beatsBox.getSelectedId()); };
+
+    metronomeButton.onClick = [this]
+    {
+        if (metronome.isRunning())
+            metronome.stop();
+        else
+            metronome.start();
+    };
+
+    tempoDisplay.setFont (juce::FontOptions (30.0f).withStyle ("Bold"));
+    tempoDisplay.setColour (juce::Label::textColourId, theme::highlight);
+    tempoDisplay.setJustificationType (juce::Justification::centredRight);
+
+    beatDots = std::make_unique<BeatDots> (metronome);
+
+    for (auto* c : std::initializer_list<juce::Component*> { &tempoLabel, &tempoSlider, &beatsLabel, &beatsBox, &tempoDisplay, beatDots.get() })
+        addAndMakeVisible (*c);
+
+    // Latency
+    styleLabel (offsetLabel, "Latency fine-tune");
+    offsetSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    offsetSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 90, 26);
+    offsetSlider.setRange (-100.0, 100.0, 0.5);
+    offsetSlider.setTextValueSuffix (" ms");
+    offsetSlider.setValue (looper.latencyOffsetMs.load(), juce::dontSendNotification);
+    offsetSlider.setDoubleClickReturnValue (true, 0.0);
+    offsetSlider.setTooltip ("If overdubs land late, move this up; if early, down.");
+    offsetSlider.onValueChange = [this] { looper.latencyOffsetMs = (float) offsetSlider.getValue(); };
+    offsetSlider.onDragEnd = [this] { saveSettings(); };
+    styleLabel (latencyLabel, {}, 0.6f);
+    styleLabel (hintLabel, {}, 0.7f);
+    hintLabel.setJustificationType (juce::Justification::topLeft);
+
+    for (auto* c : std::initializer_list<juce::Component*> { &offsetLabel, &offsetSlider, &latencyLabel, &hintLabel })
+        addAndMakeVisible (*c);
+
+    for (int t = 0; t < Looper::numTracks; ++t)
+    {
+        rows[(size_t) t] = std::make_unique<TrackRow> (looper, t);
+        addAndMakeVisible (*rows[(size_t) t]);
+    }
+
+    startTimerHz (30);
+}
+
+LooperPanel::~LooperPanel()
+{
+    saveSettings();
+}
+
+//==============================================================================
+void LooperPanel::loadSettings()
+{
+    if (auto xml = juce::parseXML (getLooperSettingsFile()))
+    {
+        looper.source = juce::jlimit (0, 1, xml->getIntAttribute ("source", 0));
+        looper.fixedBars = juce::jlimit (0, 16, xml->getIntAttribute ("fixedBars", 0));
+        looper.latencyOffsetMs = (float) juce::jlimit (-100.0, 100.0, xml->getDoubleAttribute ("latencyOffsetMs", 0.0));
+    }
+}
+
+void LooperPanel::saveSettings() const
+{
+    juce::XmlElement xml ("PRACTICE_VIBES_LOOPER");
+    xml.setAttribute ("source", looper.source.load());
+    xml.setAttribute ("fixedBars", looper.fixedBars.load());
+    xml.setAttribute ("latencyOffsetMs", (double) looper.latencyOffsetMs.load());
+    xml.writeTo (getLooperSettingsFile());
+}
+
+bool LooperPanel::keyPressed (const juce::KeyPress& key)
+{
+    const auto c = key.getTextCharacter();
+
+    if (c >= '1' && c < '1' + Looper::numTracks)
+    {
+        looper.pressTrack (c - '1');
+        return true;
+    }
+
+    return false;
+}
+
+void LooperPanel::timerCallback()
+{
+    for (auto& row : rows)
+        row->update();
+
+    beatDots->update();
+
+    const auto empty = looper.isEmpty();
+    const auto locked = metronome.isTempoLocked();
+    const auto beforeFx = looper.getActiveSource() == Looper::Source::beforeFx;
+
+    // The record mode can only change while the looper is empty.
+    afterFxButton.setEnabled (empty);
+    beforeFxButton.setEnabled (empty);
+
+    if (! empty)
+        (beforeFx ? beforeFxButton : afterFxButton).setToggleState (true, juce::dontSendNotification);
+
+    tempoSlider.setEnabled (! locked);
+    beatsBox.setEnabled (! locked);
+    tempoLabel.setEnabled (! locked);
+    beatsLabel.setEnabled (! locked);
+
+    // The Practice tab edits the same metronome.
+    if (! tempoSlider.isMouseButtonDown())
+        tempoSlider.setValue (metronome.startBpm.load(), juce::dontSendNotification);
+
+    if (beatsBox.getSelectedId() != metronome.beatsPerBar.load() && ! beatsBox.isPopupActive())
+        beatsBox.setSelectedId (metronome.beatsPerBar.load(), juce::dontSendNotification);
+
+    undoButton.setEnabled (looper.canUndo());
+    clearAllButton.setEnabled (! empty);
+    muteAllButton.setEnabled (! empty);
+    metronomeButton.setButtonText (metronome.isRunning() ? "Stop metronome" : "Start metronome");
+
+    const auto running = metronome.isRunning();
+    tempoDisplay.setText (juce::String (juce::roundToInt (running ? metronome.getCurrentBpm() : metronome.startBpm.load())) + " bpm",
+                          juce::dontSendNotification);
+
+    const auto rate = juce::jmax (1.0, looper.getSampleRate());
+    latencyLabel.setText ("Latency compensation " + juce::String (looper.getCompensationSamples() * 1000.0 / rate, 1)
+                              + " ms (audio device + plugins + fine-tune)",
+                          juce::dontSendNotification);
+
+    juce::String hint;
+
+    if (locked)
+        hint = "Tempo and bar length are locked while there are loops. Clear all to change them.";
+    else if (empty)
+        hint = "Tap Record (or press 1-4): recording starts on the nearest bar line. "
+               "If the metronome is stopped it starts, with one bar of count-in.";
+
+    if (beforeFx && engine.chain->getOutputStage().muted.load())
+        hint << (hint.isEmpty() ? "" : "\n")
+             << "Before-FX loops play through the rig: switch Monitor on in the Guitar rig tab to hear them.";
+
+    if (metronome.followSong.load() && locked)
+        hint << (hint.isEmpty() ? "" : "\n") << "\"Follow song beats\" is paused while there are loops.";
+
+    hintLabel.setText (hint, juce::dontSendNotification);
+}
+
+//==============================================================================
+void LooperPanel::paint (juce::Graphics& g)
+{
+    g.fillAll (theme::background);
+}
+
+void LooperPanel::resized()
+{
+    auto area = getLocalBounds().reduced (12, 8);
+
+    auto top = area.removeFromTop (44);
+    header.setBounds (top.removeFromLeft (90));
+    sourceLabel.setBounds (top.removeFromLeft (64));
+    afterFxButton.setBounds (top.removeFromLeft (100).reduced (2, 4));
+    beforeFxButton.setBounds (top.removeFromLeft (100).reduced (2, 4));
+    top.removeFromLeft (16);
+    lengthLabel.setBounds (top.removeFromLeft (60));
+    lengthBox.setBounds (top.removeFromLeft (220).reduced (2, 6));
+    clearAllButton.setBounds (top.removeFromRight (100).reduced (3, 4));
+    muteAllButton.setBounds (top.removeFromRight (100).reduced (3, 4));
+    undoButton.setBounds (top.removeFromRight (130).reduced (3, 4));
+
+    area.removeFromTop (4);
+    auto metro = area.removeFromTop (44);
+    metronomeButton.setBounds (metro.removeFromLeft (170).reduced (2, 4));
+    tempoDisplay.setBounds (metro.removeFromRight (130));
+    beatDots->setBounds (metro.removeFromRight (160).reduced (4, 8));
+    tempoLabel.setBounds (metro.removeFromLeft (70).withTrimmedLeft (12));
+    beatsBox.setBounds (metro.removeFromRight (70).reduced (2, 6));
+    beatsLabel.setBounds (metro.removeFromRight (110));
+    tempoSlider.setBounds (metro.reduced (0, 6));
+
+    area.removeFromTop (8);
+
+    auto bottom = area.removeFromBottom (36);
+    offsetLabel.setBounds (bottom.removeFromLeft (140));
+    offsetSlider.setBounds (bottom.removeFromLeft (juce::jmin (360, bottom.getWidth() / 2)).reduced (0, 4));
+    latencyLabel.setBounds (bottom.reduced (12, 0));
+
+    hintLabel.setBounds (area.removeFromBottom (54));
+
+    const auto rowHeight = juce::jlimit (60, 110, area.getHeight() / Looper::numTracks);
+
+    for (auto& row : rows)
+        row->setBounds (area.removeFromTop (rowHeight).reduced (0, 3));
+}
+
+} // namespace pv

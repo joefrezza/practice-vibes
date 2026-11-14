@@ -56,6 +56,28 @@ public:
     /** Applies a startBpm change immediately while running (otherwise on next start). */
     void tempoChangedByUser()                   { resetTempoRequested = true; }
 
+    //==============================================================================
+    /** The bar clock. In the app it is advanced once per audio callback, before the graph runs
+        (see PluginChain::setBlockHook), so other processors (the looper) can read this block's
+        bar lines. Times are absolute sample counts of that shared clock. If nobody calls it,
+        processBlock() advances it itself (offline tests).
+    */
+    void advanceClock (juce::int64 blockStart, int numSamples);
+
+    // Audio thread only, valid after advanceClock().
+    bool isClockRunning() const noexcept        { return clockRunning; }
+    double getClockBarStart() const noexcept    { return barStart; }            // start of the current bar
+    double getClockBarSamples() const noexcept  { return barBeats * beatSamples; }
+    int getClockBeatsPerBar() const noexcept    { return barBeats; }
+    double getClockStartTime() const noexcept   { return clockStartTime; }      // first downbeat after start()
+
+    /** Audio thread: while locked (the looper holds loops) tempo and bar length are frozen to this
+        grid, follow mode and the trainer pause, and start() lines the clicks up with the grid. */
+    void setLockedGrid (bool locked, double anchor, double barSamples, int beats);
+
+    /** For the UI: true while the looper holds the tempo. */
+    bool isTempoLocked() const noexcept         { return tempoLocked.load(); }
+
     // Status (audio -> UI)
     double getCurrentBpm() const noexcept       { return currentBpm.load(); }
     int getCurrentBeat() const noexcept         { return currentBeat.load(); }   // 0-based, -1 when stopped
@@ -97,7 +119,10 @@ private:
         bool active = false;
     };
 
-    void onTick (int beatInBar, int tickInBeat, int barLength, bool allowTrainer);
+    using Tick = std::pair<int, std::array<int, 3>>;    // (sample offset, {beatInBar, tick, barLength})
+
+    void onTick (int beatInBar, int tickInBeat, int barLength);
+    void onBarLine();
     void renderFollowingTicks (int numSamples, const ChordTrack&, std::vector<int>& tickOffsets);
     double followTickTime (const ChordTrack&, int beat, int tick, int ticks) const;
     void trigger (double frequency, double frequencyEnd, float toneLevel, double toneDecaySeconds,
@@ -120,14 +145,23 @@ private:
     bool followLocked = false;
     double expectedSongTime = 0.0;
     int followBeat = 0, followTick = 0;     // the NEXT tick to play
-    std::vector<std::pair<int, std::array<int, 3>>> pendingTicks;   // (sample offset, {beatInBar, tick, barLength})
+    std::vector<Tick> pendingTicks;
 
-    // Audio-thread state
-    double samplesUntilNextTick = 0.0;
-    int beatIndex = 0, tickIndex = 0;   // position of the NEXT tick
+    // Bar clock (audio thread). Tick times are computed from the bar start, so they never drift.
+    bool clockRunning = false, clockAdvanced = false, resetVoices = false;
+    juce::int64 nextBlockStart = 0;
+    double barStart = 0.0, beatSamples = 24000.0, clockStartTime = 0.0;
+    int barBeats = 4, lastTicks = 1;
+    int nextBeat = 0, nextTick = 0;     // the NEXT tick within the current bar
+    std::vector<Tick> clockTicks;
     double bpm = 100.0;
     int barsSinceStep = 0;
     double secondsSinceStep = 0.0;
+
+    bool gridLocked = false;
+    double lockedAnchor = 0.0, lockedBarSamples = 0.0;
+    int lockedBeats = 4;
+    std::atomic<bool> tempoLocked { false };
 
     std::array<Voice, 8> voices;
     size_t nextVoice = 0;

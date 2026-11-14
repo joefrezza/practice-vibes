@@ -316,7 +316,7 @@ void PracticePanel::startChordAnalysis (std::shared_ptr<const LoadedSong> song)
 
     waveform.setChords (nullptr);
     metronome.setSongGrid (nullptr);
-    followToggle.setEnabled (false);
+    songGridFound = false;
     updateFollowControls();
     chordView.setTrack (nullptr, song != nullptr ? "Analysing chords..." : "");
 
@@ -356,7 +356,7 @@ void PracticePanel::startChordAnalysis (std::shared_ptr<const LoadedSong> song)
             safeThis->chordView.setTrack (found ? track : nullptr, found ? juce::String() : juce::String ("No chords found in this song."));
             safeThis->waveform.setChords (found ? track : nullptr);
             safeThis->metronome.setSongGrid (found ? track : nullptr);
-            safeThis->followToggle.setEnabled (found);
+            safeThis->songGridFound = found;
             safeThis->updateFollowControls();
         });
     });
@@ -441,11 +441,14 @@ void PracticePanel::updateSnapButton()
 
 void PracticePanel::updateFollowControls()
 {
-    // While following the song, tempo and bar length come from the song.
+    // While following the song, tempo and bar length come from the song;
+    // while the looper holds loops, they are locked.
+    const auto locked = metronome.isTempoLocked();
+    followToggle.setEnabled (songGridFound && ! locked);
     const auto following = followToggle.getToggleState() && followToggle.isEnabled();
 
     for (auto* c : std::initializer_list<juce::Component*> { &bpmSlider, &bpmLabel, &beatsBox, &beatsLabel, &trainerToggle })
-        c->setEnabled (! following);
+        c->setEnabled (! following && ! locked);
 
     updateTrainerControls();
 }
@@ -499,6 +502,19 @@ void PracticePanel::timerCallback()
     waveform.setChordTranspose (transpose);
 
     metronomeButton.setButtonText (metronome.isRunning() ? "Stop metronome" : "Start metronome");
+
+    // The Looper tab edits the same metronome and can lock its tempo.
+    if (metronome.isTempoLocked() != tempoWasLocked)
+    {
+        tempoWasLocked = metronome.isTempoLocked();
+        updateFollowControls();
+    }
+
+    if (! bpmSlider.isMouseButtonDown() && bpmSlider.getValue() != metronome.startBpm.load())
+        bpmSlider.setValue (metronome.startBpm.load(), juce::dontSendNotification);
+
+    if (beatsBox.getSelectedId() != metronome.beatsPerBar.load() && ! beatsBox.isPopupActive())
+        beatsBox.setSelectedId (metronome.beatsPerBar.load(), juce::dontSendNotification);
     bpmDisplay.setText (juce::String (juce::roundToInt (metronome.isRunning() ? metronome.getCurrentBpm()
                                                                                : metronome.startBpm.load())) + " bpm",
                         juce::dontSendNotification);

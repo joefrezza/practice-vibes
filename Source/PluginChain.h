@@ -10,9 +10,11 @@ namespace pv
 
         device input (one selected channel)
           -> input stage (gain + meter, mono)
+          -> [looper, before FX: records the dry guitar, adds "before FX" loops]
           -> plugin 1 -> plugin 2 -> ...        (AUv3 on iPad, VST3 on Windows)
           -> guitar output stage (gain + mute + meter, stereo)  --+
-                                                                   +-> master (meter) -> device output
+          -> [looper, after FX: records the processed guitar,    |
+              plays "after FX" loops]  ----------------------------+-> master (meter) -> device output
         other sources (song player, metronome...)  ---------------+
 
     All methods must be called on the message thread.
@@ -57,6 +59,22 @@ public:
         return raw;
     }
 
+    /** Inserts the looper's two nodes (see Looper). Call once, before audio starts. */
+    void setLooperNodes (std::unique_ptr<juce::AudioProcessor> beforeFx, std::unique_ptr<juce::AudioProcessor> afterFx);
+
+    /** Called on the audio thread at the start of every device callback, before the graph runs,
+        with the absolute sample time of the block: drives the shared bar clock. */
+    struct BlockListener
+    {
+        virtual ~BlockListener() = default;
+        virtual void beginBlock (juce::int64 blockStart, int numSamples) = 0;
+    };
+
+    void setBlockListener (BlockListener* listener)    { blockListener = listener; }
+
+    /** Total latency the plugins report (the graph delays the other paths by as much). */
+    int getPluginLatencySamples() const;
+
     /** Serialises the chain, including every plugin's own state. */
     std::unique_ptr<juce::XmlElement> createStateXml() const;
 
@@ -92,10 +110,36 @@ private:
     juce::AudioDeviceManager& deviceManager;
     juce::AudioPluginFormatManager& formatManager;
 
+    /** Forwards everything to the AudioProcessorPlayer, calling the block listener first. */
+    struct DeviceCallback final : public juce::AudioIODeviceCallback
+    {
+        explicit DeviceCallback (PluginChain& o) : owner (o) {}
+
+        void audioDeviceIOCallbackWithContext (const float* const* ins, int numIns, float* const* outs, int numOuts,
+                                               int numSamples, const juce::AudioIODeviceCallbackContext& context) override
+        {
+            if (auto* listener = owner.blockListener.load())
+                listener->beginBlock (time, numSamples);
+
+            time += numSamples;
+            owner.player.audioDeviceIOCallbackWithContext (ins, numIns, outs, numOuts, numSamples, context);
+        }
+
+        void audioDeviceAboutToStart (juce::AudioIODevice* device) override    { owner.player.audioDeviceAboutToStart (device); }
+        void audioDeviceStopped() override                                      { owner.player.audioDeviceStopped(); }
+        void audioDeviceError (const juce::String& message) override            { owner.player.audioDeviceError (message); }
+
+        PluginChain& owner;
+        juce::int64 time = 0;
+    };
+
     juce::AudioProcessorGraph graph;
     juce::AudioProcessorPlayer player;
+    DeviceCallback deviceCallback { *this };
+    std::atomic<BlockListener*> blockListener { nullptr };
 
     NodePtr audioInNode, audioOutNode, inputStageNode, outputStageNode, masterNode;
+    NodePtr looperBeforeNode, looperAfterNode;
     std::vector<Slot> slots;
     std::vector<NodePtr> sources;
     int inputChannel = 0;

@@ -1,7 +1,8 @@
-// Offline checks of the song player and metronome DSP. Run: PracticeVibesTests(.exe)
+// Offline checks of the song player, metronome and looper DSP. Run: PracticeVibesTests(.exe)
 // Exit code 0 = all passed.
 
 #include "../Source/ChordAnalyzer.h"
+#include "../Source/Looper.h"
 #include "../Source/MetronomeProcessor.h"
 #include "../Source/PlayerProcessor.h"
 
@@ -536,6 +537,251 @@ namespace
         }
     }
 
+    //==============================================================================
+    /** Drives a metronome + looper the way the app's audio callback does. */
+    struct LooperRig
+    {
+        static constexpr double rate = 48000.0;
+        MetronomeProcessor metronome;
+        Looper looper { metronome };
+        juce::int64 time = 0;
+        std::vector<float> out;     // output (left channel) by graph time
+        bool beforeFx = false;
+        int blockSize = 480;        // deliberately not a divisor of the bar length
+
+        LooperRig()
+        {
+            metronome.prepareToPlay (rate, 1024);
+            looper.prepare (rate, 1024);
+            metronome.gain = 0.0f;
+            metronome.startBpm = 120.0;     // 4/4: a bar is 2 s = 96000 samples
+        }
+
+        template <typename Input>
+        void runUntil (double seconds, Input input)
+        {
+            const auto until = (juce::int64) (seconds * rate);
+            juce::AudioBuffer<float> click (2, 1024), audio (2, 1024);
+            juce::MidiBuffer midi;
+
+            if ((juce::int64) out.size() < until)
+                out.resize ((size_t) until, 0.0f);
+
+            while (time < until)
+            {
+                const auto n = (int) juce::jmin ((juce::int64) blockSize, until - time);
+                metronome.advanceClock (time, n);
+                looper.beginBlock (time, n);
+
+                for (int i = 0; i < n; ++i)
+                {
+                    const auto v = input (time + i);
+                    audio.setSample (0, i, v);
+                    audio.setSample (1, i, v);
+                }
+
+                if (beforeFx)
+                    looper.processBeforeFx (audio.getWritePointer (0), n);
+                else
+                    looper.processAfterFx (audio.getWritePointer (0), audio.getWritePointer (1), n);
+
+                click.setSize (2, n, false, false, true);
+                metronome.processBlock (click, midi);
+
+                for (int i = 0; i < n; ++i)
+                    out[(size_t) (time + i)] = audio.getSample (0, i);
+
+                time += n;
+            }
+        }
+
+        /** Largest difference between the output and `expected` over [from, to) seconds. */
+        template <typename Expected>
+        float maxError (double from, double to, Expected expected) const
+        {
+            float worst = 0.0f;
+
+            for (auto g = (juce::int64) (from * rate); g < (juce::int64) (to * rate); ++g)
+                worst = juce::jmax (worst, std::abs (out[(size_t) g] - expected (g)));
+
+            return worst;
+        }
+    };
+
+    float noiseAt (juce::int64 g, int seed = 1)
+    {
+        return (float) (((g * 7919 + seed * 104729) % 10007) / 10007.0 - 0.5);
+    }
+
+    void testLooper()
+    {
+        std::cout << "Looper" << std::endl;
+        constexpr double rate = LooperRig::rate;
+        constexpr double bar = 2.0 * rate;
+        const auto silence = [] (juce::int64) { return 0.0f; };
+
+        // The loop holds what was played from `origin`, and repeats with `period`.
+        auto loopOf = [] (double origin, double period, int seed = 1)
+        {
+            return [origin, period, seed] (juce::int64 g)
+            {
+                auto offset = std::fmod ((double) g - origin, period);
+                offset = offset < 0 ? offset + period : offset;
+                return noiseAt ((juce::int64) origin + (juce::int64) offset, seed);
+            };
+        };
+
+        {
+            // Fixed 2 bars, pressed 0.1 s late: starts retroactively on the first bar line.
+            LooperRig rig;
+            rig.looper.fixedBars = 2;
+            rig.metronome.start();
+            rig.runUntil (0.1, [] (juce::int64 g) { return noiseAt (g); });
+            rig.looper.pressTrack (0);
+            rig.runUntil (4.05, [] (juce::int64 g) { return noiseAt (g); });
+            check (rig.looper.getState (0) == Looper::State::playing, "fixed 2-bar loop plays after 2 bars");
+            check (rig.looper.getBars (0) == 2, "loop is 2 bars: " + juce::String (rig.looper.getBars (0)));
+            check (rig.metronome.isTempoLocked(), "tempo locked while loops exist");
+            rig.runUntil (12.0, silence);
+            const auto error = rig.maxError (4.0, 12.0, loopOf (0.0, 2 * bar));
+            check (error < 1.0e-6f, "late press: loop starts on the bar line and repeats exactly (error " + juce::String (error) + ")");
+        }
+
+        {
+            // Latency compensation: the guitar arrives 25 ms late, the loop must still sit on the grid.
+            LooperRig rig;
+            const auto latency = 1200;
+            rig.looper.fixedBars = 1;
+            rig.looper.deviceLatencySamples = latency;
+            rig.metronome.start();
+            rig.runUntil (1.9, silence);
+            rig.looper.pressTrack (0);      // early press: waits for the bar line at 2 s
+            auto late = [latency] (juce::int64 g) { return g >= 96000 + latency && g < 2 * 96000 + latency ? noiseAt (g - latency) : 0.0f; };
+            rig.runUntil (8.0, late);
+            const auto error = rig.maxError (4.0, 8.0, loopOf (bar, bar));
+            check (error < 1.0e-6f, "latency-compensated loop sits on the grid (error " + juce::String (error) + ")");
+        }
+
+        {
+            // Free length: stop pressed 0.1 s after the 2nd bar line -> exactly 2 bars.
+            LooperRig rig;
+            rig.metronome.start();
+            rig.runUntil (0.02, [] (juce::int64 g) { return noiseAt (g); });
+            rig.looper.pressTrack (0);
+            rig.runUntil (4.1, [] (juce::int64 g) { return noiseAt (g); });
+            check (rig.looper.getState (0) == Looper::State::recording, "free recording keeps going");
+            rig.looper.pressTrack (0);
+            rig.runUntil (12.0, silence);
+            check (rig.looper.getBars (0) == 2, "free stop rounds to 2 bars: " + juce::String (rig.looper.getBars (0)));
+            const auto error = rig.maxError (4.2, 12.0, loopOf (0.0, 2 * bar));
+            check (error < 1.0e-6f, "free loop repeats exactly (error " + juce::String (error) + ")");
+        }
+
+        {
+            // Count-in: metronome stopped, the press starts it and recording begins one bar later.
+            LooperRig rig;
+            rig.looper.fixedBars = 1;
+            rig.runUntil (0.5, silence);
+            rig.looper.pressTrack (0);
+            rig.runUntil (2.0, silence);
+            check (rig.metronome.isRunning(), "pressing record starts the metronome");
+            check (rig.looper.getState (0) == Looper::State::armed, "armed during the count-in bar");
+            rig.runUntil (8.0, [] (juce::int64 g) { return noiseAt (g); });
+            const auto start = 0.5 * rate + bar;    // first block after the press starts the metronome
+            const auto error = rig.maxError (5.0, 8.0, loopOf (start, bar));
+            check (error < 1.0e-6f, "recording starts after one bar of count-in (error " + juce::String (error) + ")");
+        }
+
+        {
+            // Overdub, undo, and the merge of an older overdub.
+            LooperRig rig;
+            rig.looper.fixedBars = 1;
+            rig.metronome.start();
+            rig.looper.pressTrack (0);
+            rig.runUntil (2.0, [] (juce::int64 g) { return noiseAt (g); });
+            rig.runUntil (3.0, silence);
+
+            // Overdub input repeats with the loop, so what lands at each loop position is predictable.
+            rig.looper.pressTrack (0);      // overdub for exactly one cycle, 3 s -> 5 s
+            rig.runUntil (5.0, [] (juce::int64 g) { return noiseAt (g % 96000, 2); });
+            rig.looper.pressTrack (0);
+            check (rig.looper.canUndo(), "an overdub can be undone");
+            rig.runUntil (8.0, silence);
+
+            auto base = loopOf (0.0, bar);
+            auto dub = loopOf (0.0, bar, 2);
+            auto both = [&] (juce::int64 g) { return base (g) + dub (g); };
+            auto error = rig.maxError (6.0, 8.0, both);
+            check (error < 1.0e-5f, "overdub adds to the loop (error " + juce::String (error) + ")");
+
+            rig.looper.undo();
+            rig.runUntil (10.0, silence);
+            error = rig.maxError (8.1, 10.0, base);
+            check (error < 1.0e-6f, "undo removes the overdub (error " + juce::String (error) + ")");
+
+            // Two overdubs: starting the second merges the first; undo then removes only the second.
+            rig.looper.pressTrack (0);
+            rig.runUntil (12.0, [] (juce::int64 g) { return noiseAt (g % 96000, 2); });
+            rig.looper.pressTrack (0);
+            rig.looper.pressTrack (0);
+            rig.runUntil (14.0, [] (juce::int64 g) { return noiseAt (g % 96000, 3); });
+            rig.looper.pressTrack (0);
+            rig.runUntil (16.0, silence);
+            rig.looper.undo();
+            rig.runUntil (20.0, silence);
+            error = rig.maxError (16.1, 20.0, both);
+            check (error < 1.0e-5f, "first overdub merged, second undone (error " + juce::String (error) + ")");
+        }
+
+        {
+            // Second track: 2 bars over a 1-bar loop, started late in a bar; both stay on the grid.
+            LooperRig rig;
+            rig.looper.fixedBars = 1;
+            rig.metronome.start();
+            rig.looper.pressTrack (0);
+            rig.runUntil (2.0, [] (juce::int64 g) { return noiseAt (g); });
+            rig.looper.fixedBars = 2;
+            rig.runUntil (5.0, silence);
+            rig.looper.pressTrack (1);      // 1 s into a bar: waits for 6 s
+            rig.runUntil (10.0, [] (juce::int64 g) { return g >= 6 * 48000 ? noiseAt (g, 4) : 0.0f; });
+            rig.runUntil (16.0, silence);
+            auto a = loopOf (0.0, bar);
+            auto b = loopOf (6.0 * rate, 2 * bar, 4);
+            const auto error = rig.maxError (10.0, 16.0, [&] (juce::int64 g) { return a (g) + b (g); });
+            check (error < 1.0e-5f, "two tracks of different lengths stay on the grid (error " + juce::String (error) + ")");
+
+            // Stop and restart the metronome: the clicks come back on the loop's bar lines.
+            rig.metronome.stop();
+            rig.runUntil (16.73, silence);
+            rig.metronome.start();
+            rig.runUntil (17.0, silence);
+            const auto barStart = rig.metronome.getClockBarStart();
+            check (std::abs (std::fmod (barStart, bar)) < 1.0e-6 && std::abs (rig.metronome.getCurrentBpm() - 120.0) < 1.0e-6,
+                   "restarted metronome follows the loop grid (bar start " + juce::String (barStart / rate, 4) + " s)");
+
+            rig.looper.clearAll();
+            rig.runUntil (17.1, silence);
+            check (rig.looper.isEmpty() && ! rig.metronome.isTempoLocked(), "clear all frees the tempo");
+        }
+
+        {
+            // Before FX: loops are mixed into the dry signal that feeds the plugins.
+            LooperRig rig;
+            rig.beforeFx = true;
+            rig.looper.source = (int) Looper::Source::beforeFx;
+            rig.looper.fixedBars = 1;
+            rig.metronome.start();
+            rig.looper.pressTrack (0);
+            rig.runUntil (2.0, [] (juce::int64 g) { return noiseAt (g); });
+            rig.runUntil (6.0, [] (juce::int64 g) { return 0.25f * noiseAt (g, 5); });
+            auto expected = [loop = loopOf (0.0, bar)] (juce::int64 g) { return loop (g) + 0.25f * noiseAt (g, 5); };
+            const auto error = rig.maxError (2.0, 6.0, expected);
+            check (rig.looper.getActiveSource() == Looper::Source::beforeFx && error < 1.0e-5f,
+                   "before-FX loop plays under the live dry guitar (error " + juce::String (error) + ")");
+        }
+    }
+
+
     /** Metronome following the song's beat grid through the player, at two speeds,
         in both processing orders, and across a loop jump. */
     void testFollowSong()
@@ -674,6 +920,7 @@ int main()
     testSlashChords();
     testMeters();
     testFollowSong();
+    testLooper();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

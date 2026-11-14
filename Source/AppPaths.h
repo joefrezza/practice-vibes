@@ -26,6 +26,7 @@ inline juce::File getAppDataFolder()
 
 inline juce::File getLogFile()            { return getAppDataFolder().getChildFile ("PracticeVibes.log"); }
 inline juce::File getChainFile()          { return getAppDataFolder().getChildFile ("chain.xml"); }
+inline juce::File getLooperSettingsFile() { return getAppDataFolder().getChildFile ("looper.xml"); }
 inline juce::File getDeviceStateFile()    { return getAppDataFolder().getChildFile ("audio-device.xml"); }
 inline juce::File getPluginCacheFile()    { return getAppDataFolder().getChildFile ("plugin-cache.xml"); }
 inline juce::File getDeadMansPedalFile()  { return getAppDataFolder().getChildFile ("plugin-scan-in-progress.txt"); }

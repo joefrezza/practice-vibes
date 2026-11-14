@@ -34,6 +34,8 @@ void MetronomeProcessor::prepareToPlay (double newSampleRate, int maximumBlockSi
     samplesRendered = 0;
     followLocked = false;
     pendingTicks.reserve ((size_t) juce::jmax (64, maximumBlockSize));
+    clockTicks.reserve ((size_t) juce::jmax (64, maximumBlockSize));
+    beatSamples = sampleRate * 60.0 / bpm;
 }
 
 void MetronomeProcessor::setSongGrid (std::shared_ptr<const ChordTrack> grid)
@@ -109,7 +111,7 @@ float MetronomeProcessor::renderVoices()
     return out;
 }
 
-void MetronomeProcessor::onTick (int beatInBar, int tickInBeat, int barLength, bool allowTrainer)
+void MetronomeProcessor::onTick (int beatInBar, int tickInBeat, int barLength)
 {
     const auto isBeat = tickInBeat == 0;
     const auto isDownbeat = isBeat && beatInBar == 0 && accentFirstBeat.load() && barLength > 1;
@@ -147,14 +149,33 @@ void MetronomeProcessor::onTick (int beatInBar, int tickInBeat, int barLength, b
         }
     }
 
-    if (! isBeat)
+    if (isBeat)
+    {
+        currentBeat = beatInBar;
+        currentBeatsPerBar = barLength;
+    }
+}
+
+void MetronomeProcessor::setLockedGrid (bool locked, double anchor, double barSamples, int beats)
+{
+    gridLocked = locked && barSamples > 0.0 && beats > 0;
+    lockedAnchor = anchor;
+    lockedBarSamples = barSamples;
+    lockedBeats = juce::jmax (1, beats);
+    tempoLocked = gridLocked;
+}
+
+void MetronomeProcessor::onBarLine()
+{
+    ++barsSinceStep;
+
+    if (gridLocked)
         return;
 
-    currentBeat = beatInBar;
-    currentBeatsPerBar = barLength;
+    barBeats = juce::jmax (1, beatsPerBar.load());
 
     // Speed trainer: tempo steps happen on bar lines.
-    if (allowTrainer && beatInBar == 0 && trainerEnabled.load())
+    if (trainerEnabled.load() && ! following.load())
     {
         const auto interval = juce::jmax (0.01, trainerInterval.load());
         const auto due = trainerUnit.load() == (int) IntervalUnit::bars
@@ -167,48 +188,160 @@ void MetronomeProcessor::onTick (int beatInBar, int tickInBeat, int barLength, b
             const auto limit = trainerMaxBpm.load();
             bpm = step >= 0 ? juce::jmin (limit, bpm + step) : juce::jmax (limit, bpm + step);
             currentBpm = bpm;
+            beatSamples = sampleRate * 60.0 / bpm;
             barsSinceStep = 0;
             secondsSinceStep = 0.0;
         }
     }
 }
 
+void MetronomeProcessor::advanceClock (juce::int64 blockStart, int numSamples)
+{
+    clockAdvanced = true;
+    nextBlockStart = blockStart + numSamples;
+    clockTicks.clear();
+
+    const auto start = (double) blockStart;
+    const auto ticks = ticksPerBeat ((Subdivision) subdivision.load());
+
+    // Puts the next tick at or after `time` (the bar start and tempo being set).
+    auto placeNextTick = [this, ticks] (double time)
+    {
+        const auto position = juce::jmax (0.0, (time - barStart) / beatSamples);
+        nextBeat = (int) std::floor (position);
+        nextTick = (int) std::ceil ((position - nextBeat) * ticks - 1.0e-9);
+
+        if (nextTick >= ticks)
+        {
+            nextTick = 0;
+            ++nextBeat;
+        }
+    };
+
+    if (startRequested.exchange (false))
+    {
+        resetVoices = true;
+        barsSinceStep = 0;
+        secondsSinceStep = 0.0;
+        lastTicks = ticks;
+
+        if (gridLocked)
+        {
+            // Line up with the loops: same tempo, same bar lines.
+            barBeats = lockedBeats;
+            beatSamples = lockedBarSamples / barBeats;
+            bpm = 60.0 * sampleRate / beatSamples;
+            barStart = lockedAnchor + std::floor ((start - lockedAnchor) / lockedBarSamples) * lockedBarSamples;
+            placeNextTick (start);
+            clockStartTime = nextBeat == 0 && nextTick == 0 ? barStart : barStart + lockedBarSamples;
+        }
+        else
+        {
+            bpm = juce::jlimit (20.0, 400.0, startBpm.load());
+            barBeats = juce::jmax (1, beatsPerBar.load());
+            beatSamples = sampleRate * 60.0 / bpm;
+            barStart = start;
+            nextBeat = 0;
+            nextTick = 0;
+            clockStartTime = start;
+        }
+
+        currentBpm = bpm;
+        clockRunning = true;
+    }
+
+    if (! running.load())
+        clockRunning = false;
+
+    if (! clockRunning)
+        return;
+
+    if (resetTempoRequested.exchange (false) && ! gridLocked)
+    {
+        // Keep the position within the bar; the new tempo applies from here on.
+        const auto position = (start - barStart) / beatSamples;
+        bpm = juce::jlimit (20.0, 400.0, startBpm.load());
+        currentBpm = bpm;
+        beatSamples = sampleRate * 60.0 / bpm;
+        barStart = start - position * beatSamples;
+        barsSinceStep = 0;
+        secondsSinceStep = 0.0;
+    }
+
+    if (ticks != lastTicks)
+    {
+        // The subdivision changed: the next tick moves to the new subdivision grid.
+        const auto position = nextBeat + (double) nextTick / lastTicks;
+        lastTicks = ticks;
+        placeNextTick (barStart + position * beatSamples);
+    }
+
+    const auto blockEnd = blockStart + numSamples;
+
+    for (;;)
+    {
+        if (nextBeat >= barBeats)
+        {
+            // The bar line is crossed when the next downbeat is due, not after the last tick.
+            if ((juce::int64) std::ceil (barStart + barBeats * beatSamples - 1.0e-9) >= blockEnd)
+                break;
+
+            barStart += barBeats * beatSamples;
+            nextBeat = 0;
+            nextTick = 0;
+            onBarLine();
+            continue;
+        }
+
+        const auto t = barStart + (nextBeat + (double) nextTick / ticks) * beatSamples;
+        const auto sample = (juce::int64) std::ceil (t - 1.0e-9);
+
+        if (sample >= blockEnd)
+            break;
+
+        const auto offset = (int) juce::jlimit ((juce::int64) 0, (juce::int64) numSamples - 1, sample - blockStart);
+        clockTicks.push_back ({ offset, { nextBeat, nextTick, barBeats } });
+
+        if (++nextTick >= ticks)
+        {
+            nextTick = 0;
+            ++nextBeat;
+        }
+    }
+
+    if (! following.load())
+        secondsSinceStep += numSamples / sampleRate;
+}
+
 void MetronomeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     buffer.clear();
 
-    if (startRequested.exchange (false))
+    const auto numSamples = buffer.getNumSamples();
+
+    if (! clockAdvanced)
+        advanceClock (nextBlockStart, numSamples);    // nobody drives the clock (offline use)
+
+    clockAdvanced = false;
+
+    if (resetVoices)
     {
-        bpm = juce::jlimit (20.0, 400.0, startBpm.load());
-        currentBpm = bpm;
-        beatIndex = 0;
-        tickIndex = 0;
-        samplesUntilNextTick = 0.0;
-        barsSinceStep = -1;     // becomes 0 on the first downbeat: counts *completed* bars
-        secondsSinceStep = 0.0;
+        resetVoices = false;
 
         for (auto& v : voices)
             v.active = false;
     }
 
-    if (resetTempoRequested.exchange (false))
-    {
-        bpm = juce::jlimit (20.0, 400.0, startBpm.load());
-        currentBpm = bpm;
-        barsSinceStep = -1;
-        secondsSinceStep = 0.0;
-    }
-
-    const auto numSamples = buffer.getNumSamples();
     auto* left = buffer.getWritePointer (0);
     auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
     const auto targetGain = gain.load();
     const auto isRunning = running.load();
 
     // Follow mode: ticks come from the song's beat grid, placed where the player is.
+    // Paused while the looper holds the tempo.
     std::shared_ptr<const ChordTrack> grid;
 
-    if (followSong.load() && player != nullptr)
+    if (followSong.load() && player != nullptr && ! gridLocked)
     {
         const juce::SpinLock::ScopedTryLockType lock (gridLock);
 
@@ -228,6 +361,7 @@ void MetronomeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     else
     {
         followLocked = false;
+        pendingTicks = clockTicks;
     }
 
     size_t nextPending = 0;
@@ -237,33 +371,8 @@ void MetronomeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         while (nextPending < pendingTicks.size() && pendingTicks[nextPending].first <= i)
         {
             const auto& t = pendingTicks[nextPending++].second;
-            onTick (t[0], t[1], t[2], false);
+            onTick (t[0], t[1], t[2]);
         }
-
-        if (isRunning && ! followMode && samplesUntilNextTick <= 0.0)
-        {
-            const auto barLength = juce::jmax (1, beatsPerBar.load());
-            const auto ticks = ticksPerBeat ((Subdivision) subdivision.load());
-
-            if (tickIndex >= ticks)
-            {
-                tickIndex = 0;
-                ++beatIndex;
-            }
-
-            if (beatIndex >= barLength)
-                beatIndex = 0;
-
-            if (tickIndex == 0 && beatIndex == 0)
-                ++barsSinceStep;
-
-            onTick (beatIndex, tickIndex, barLength, true);
-            ++tickIndex;
-            samplesUntilNextTick += sampleRate * 60.0 / bpm / ticks;
-        }
-
-        if (isRunning && ! followMode)
-            samplesUntilNextTick -= 1.0;
 
         // Voices keep ringing briefly after stop, so stopping never clicks.
         const auto g = lastGain + (targetGain - lastGain) * ((float) i / (float) numSamples);
@@ -276,9 +385,6 @@ void MetronomeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
     lastGain = targetGain;
     samplesRendered += numSamples;
-
-    if (isRunning && ! followMode)
-        secondsSinceStep += numSamples / sampleRate;
 }
 
 void MetronomeProcessor::renderFollowingTicks (int numSamples, const ChordTrack& grid, std::vector<int>&)

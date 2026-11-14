@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "LooperPanel.h"
 #include "PracticePanel.h"
 #include "RigPanel.h"
 #include "Theme.h"
@@ -190,6 +191,7 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
     saveButton.onClick = [this] { engine.saveState(); };
 
     practicePanel = std::make_unique<PracticePanel> (*engine.player, *engine.metronome);
+    looperPanel = std::make_unique<LooperPanel> (engine);
     rigPanel = std::make_unique<RigPanel> (engine);
     logPanel = std::make_unique<LogPanel> (appLog);
 
@@ -199,6 +201,7 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
     tabs.setTabBarDepth (42);
     tabs.setOutline (0);
     tabs.addTab ("Practice", theme::background, practicePanel.get(), false);
+    tabs.addTab ("Looper", theme::background, looperPanel.get(), false);
     tabs.addTab ("Guitar rig", theme::background, rigPanel.get(), false);
     tabs.addTab ("Log", theme::background, logPanel.get(), false);
     addAndMakeVisible (tabs);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_utils/juce_audio_utils.h>
+#include "Looper.h"
 #include "MetronomeProcessor.h"
 #include "MidiMonitor.h"
 #include "PlayerProcessor.h"
@@ -11,7 +12,9 @@ namespace pv
 {
 
 /** Owns the non-UI parts of the app: audio device, plugin formats, the chain, MIDI. */
-class AppEngine final : private juce::ChangeListener
+class AppEngine final : private juce::ChangeListener,
+                        private PluginChain::BlockListener,
+                        private juce::Timer
 {
 public:
     AppEngine();
@@ -36,8 +39,13 @@ public:
     PlayerProcessor* player = nullptr;
     MetronomeProcessor* metronome = nullptr;
 
+    // Uses the metronome; its two audio nodes live in the chain's graph.
+    std::unique_ptr<Looper> looper;
+
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void beginBlock (juce::int64 blockStart, int numSamples) override;
+    void timerCallback() override;      // keeps the looper's latency compensation current
 
     /** Name of the system default output for the current device type ("" if unknown). */
     juce::String getSystemDefaultOutputName() const;

@@ -49,7 +49,7 @@ PluginChain::PluginChain (juce::AudioDeviceManager& dm, juce::AudioPluginFormatM
     getOutputStage().muted = true;
 
     player.setProcessor (&graph);
-    deviceManager.addAudioCallback (&player);
+    deviceManager.addAudioCallback (&deviceCallback);
     deviceManager.addChangeListener (this);
 
     rebuildConnections();
@@ -59,10 +59,12 @@ PluginChain::~PluginChain()
 {
     alive.reset();
     deviceManager.removeChangeListener (this);
-    deviceManager.removeAudioCallback (&player);
+    deviceManager.removeAudioCallback (&deviceCallback);
     player.setProcessor (nullptr);
     slots.clear();
     sources.clear();
+    looperBeforeNode = nullptr;
+    looperAfterNode = nullptr;
     graph.clear();
 }
 
@@ -209,6 +211,23 @@ void PluginChain::clear()
     notifyChange();
 }
 
+void PluginChain::setLooperNodes (std::unique_ptr<juce::AudioProcessor> beforeFx, std::unique_ptr<juce::AudioProcessor> afterFx)
+{
+    looperBeforeNode = graph.addNode (std::move (beforeFx), std::nullopt, UpdateKind::none);
+    looperAfterNode = graph.addNode (std::move (afterFx), std::nullopt, UpdateKind::none);
+    rebuildConnections();
+}
+
+int PluginChain::getPluginLatencySamples() const
+{
+    int total = 0;
+
+    for (auto& slot : slots)
+        total += juce::jmax (0, slot.node->getProcessor()->getLatencySamples());
+
+    return total;
+}
+
 void PluginChain::setInputChannel (int channel)
 {
     inputChannel = juce::jmax (0, channel);
@@ -238,6 +257,12 @@ void PluginChain::rebuildConnections()
     auto previous = inputStageNode->nodeID;
     auto previousChannels = 1;
 
+    if (looperBeforeNode != nullptr)
+    {
+        connect (inputStageNode->nodeID, 0, looperBeforeNode->nodeID, 0);
+        previous = looperBeforeNode->nodeID;
+    }
+
     for (auto& slot : slots)
     {
         auto* processor = slot.node->getProcessor();
@@ -259,6 +284,16 @@ void PluginChain::rebuildConnections()
 
     for (int c = 0; c < 2; ++c)
         connect (outputStageNode->nodeID, c, masterNode->nodeID, c);
+
+    if (looperAfterNode != nullptr)
+    {
+        // Recorded before the guitar output stage, so loops record even with monitoring off.
+        for (int c = 0; c < 2; ++c)
+        {
+            connect (previous, juce::jmin (c, previousChannels - 1), looperAfterNode->nodeID, c);
+            connect (looperAfterNode->nodeID, c, masterNode->nodeID, c);
+        }
+    }
 
     for (auto& source : sources)
     {

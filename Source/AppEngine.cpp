@@ -27,19 +27,26 @@ AppEngine::AppEngine()
 
     if (metronome != nullptr && player != nullptr)
         metronome->setPlayer (player);
+
+    looper = std::make_unique<Looper> (*metronome);
+    chain->setLooperNodes (looper->createBeforeFxNode(), looper->createAfterFxNode());
+    chain->setBlockListener (this);
+    startTimerHz (2);
     catalogue = std::make_unique<PluginCatalogue> (formatManager);
     midi = std::make_unique<MidiMonitor> (deviceManager);
 }
 
 AppEngine::~AppEngine()
 {
+    stopTimer();
     alive.reset();
     deviceManager.removeChangeListener (this);
     midi.reset();
     catalogue.reset();
     player = nullptr;
     metronome = nullptr;
-    chain.reset();
+    chain.reset();      // stops audio and deletes the looper's nodes before the looper
+    looper.reset();
     deviceManager.closeAudioDevice();
 }
 
@@ -154,6 +161,24 @@ void AppEngine::changeListenerCallback (juce::ChangeBroadcaster*)
 
     if (error.isNotEmpty())
         juce::Logger::writeToLog ("Could not switch output: " + error);
+}
+
+void AppEngine::beginBlock (juce::int64 blockStart, int numSamples)
+{
+    // Audio thread: the bar clock first, then the looper, which reads this block's bar lines.
+    metronome->advanceClock (blockStart, numSamples);
+    looper->beginBlock (blockStart, numSamples);
+}
+
+void AppEngine::timerCallback()
+{
+    int deviceLatency = 0;
+
+    if (auto* device = deviceManager.getCurrentAudioDevice())
+        deviceLatency = device->getInputLatencyInSamples() + device->getOutputLatencyInSamples();
+
+    looper->deviceLatencySamples = deviceLatency;
+    looper->chainLatencySamples = chain->getPluginLatencySamples();
 }
 
 void AppEngine::logAudioDeviceInfo()
