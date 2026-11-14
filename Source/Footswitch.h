@@ -92,6 +92,10 @@ public:
     /** Same, with an explicit time in seconds (tests). */
     bool handleMidi (const juce::MidiMessage&, double nowSeconds);
 
+    /** Any thread (the MIDI input thread): true if the message belongs to a learned switch, or
+        a switch is being learned. Such messages are kept away from the drum plugin. */
+    bool isFootswitchMessage (const juce::MidiMessage&) const noexcept;
+
     /** Fires hold actions that are due. Called by an internal timer; public for tests. */
     void update (double nowSeconds);
 
@@ -127,6 +131,8 @@ private:
     void fire (int index, const FootswitchAction&, const char* gesture, double pressSeconds);
     void finishPending (bool momentary);
     void changed();
+    void publish();             // copies the learned triggers for isFootswitchMessage()
+    static int encode (const MidiTrigger&) noexcept;
 
     std::array<Switch, numSwitches> switches;
     std::array<Runtime, numSwitches> runtime;
@@ -135,6 +141,9 @@ private:
     int learning = -1;
     int pending = -1;           // switch learned, waiting for a release (momentary) or the window to end
     double pendingSince = 0.0;
+
+    std::array<std::atomic<int>, numSwitches> publishedTriggers {};     // encode(), 0 = none
+    std::atomic<bool> publishedLearning { false };
 };
 
 } // namespace pv

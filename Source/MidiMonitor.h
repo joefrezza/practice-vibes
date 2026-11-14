@@ -11,7 +11,10 @@ namespace pv
 class MidiMonitor final : private juce::MidiInputCallback
 {
 public:
-    explicit MidiMonitor (juce::AudioDeviceManager&);
+    /** `realtime` (optional) is called on the MIDI input thread for every message, before the
+        hop to the message thread: for sending notes to the audio graph without extra delay. */
+    explicit MidiMonitor (juce::AudioDeviceManager&,
+                          std::function<void (const juce::MidiMessage&)> realtime = {});
     ~MidiMonitor() override;
 
     void enableAllInputs();
@@ -27,6 +30,7 @@ private:
     void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage&) override;
 
     juce::AudioDeviceManager& deviceManager;
+    const std::function<void (const juce::MidiMessage&)> realtime;
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
     juce::MidiDeviceListConnection deviceListConnection;
 

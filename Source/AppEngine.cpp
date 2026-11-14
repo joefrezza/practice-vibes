@@ -28,18 +28,28 @@ AppEngine::AppEngine()
     if (metronome != nullptr && player != nullptr)
         metronome->setPlayer (player);
 
+    if (auto xml = juce::parseXML (getMetronomeFile()))
+        metronome->applySettingsXml (*xml);
+
+    savedMetronomeSettings = metronome->createSettingsXml()->toString();
+
     looper = std::make_unique<Looper> (*metronome);
     chain->setLooperNodes (looper->createBeforeFxNode(), looper->createAfterFxNode());
     chain->setBlockListener (this);
     chain->setPlayHead (&playHead);
     startTimerHz (2);
     catalogue = std::make_unique<PluginCatalogue> (formatManager);
-    midi = std::make_unique<MidiMonitor> (deviceManager);
-
     footswitch = std::make_unique<Footswitch>();
 
     if (auto xml = juce::parseXML (getFootswitchFile()))
         footswitch->fromXml (*xml);
+
+    // MIDI thread: everything but the pedal's own messages goes straight to the drum plugin.
+    midi = std::make_unique<MidiMonitor> (deviceManager, [this] (const juce::MidiMessage& message)
+    {
+        if (! message.isSysEx() && ! footswitch->isFootswitchMessage (message))
+            chain->sendDrumMidi (message);
+    });
 
     footswitch->onChange = [this] { footswitch->toXml()->writeTo (getFootswitchFile()); };
     footswitch->perform = [this] (FootswitchAction action, double pressSeconds) { performFootswitchAction (action, pressSeconds); };
@@ -116,8 +126,20 @@ void AppEngine::start()
     });
 }
 
+void AppEngine::saveMetronomeIfChanged()
+{
+    // The Practice and Looper tabs both edit the metronome: one place notices and saves.
+    const auto settings = metronome->createSettingsXml()->toString();
+
+    if (settings != savedMetronomeSettings && settings.length() > 0)
+        if (juce::File (getMetronomeFile()).replaceWithText (settings))
+            savedMetronomeSettings = settings;
+}
+
 void AppEngine::saveState()
 {
+    saveMetronomeIfChanged();
+
     if (auto deviceXml = deviceManager.createStateXml())
     {
         deviceXml->setAttribute (followAttribute, followSystemOutput);
@@ -235,6 +257,7 @@ void AppEngine::timerCallback()
 
     looper->deviceLatencySamples = deviceLatency;
     looper->chainLatencySamples = chain->getPluginLatencySamples();
+    saveMetronomeIfChanged();
 }
 
 void AppEngine::logAudioDeviceInfo()

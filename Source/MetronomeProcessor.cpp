@@ -3,6 +3,46 @@
 namespace pv
 {
 
+//==============================================================================
+std::unique_ptr<juce::XmlElement> MetronomeProcessor::createSettingsXml() const
+{
+    auto xml = std::make_unique<juce::XmlElement> ("PRACTICE_VIBES_METRONOME");
+    xml->setAttribute ("bpm", startBpm.load());
+    xml->setAttribute ("beatsPerBar", beatsPerBar.load());
+    xml->setAttribute ("accentFirstBeat", accentFirstBeat.load());
+    xml->setAttribute ("gain", (double) gain.load());
+    xml->setAttribute ("subdivision", subdivision.load());
+    xml->setAttribute ("sound", sound.load());
+    xml->setAttribute ("subdivisionLevel", (double) subdivisionLevel.load());
+    xml->setAttribute ("swing", swing.load());
+    xml->setAttribute ("followSong", followSong.load());
+    xml->setAttribute ("trainer", trainerEnabled.load());
+    xml->setAttribute ("trainerStepBpm", trainerStepBpm.load());
+    xml->setAttribute ("trainerInterval", trainerInterval.load());
+    xml->setAttribute ("trainerUnit", trainerUnit.load());
+    xml->setAttribute ("trainerMaxBpm", trainerMaxBpm.load());
+    return xml;
+}
+
+void MetronomeProcessor::applySettingsXml (const juce::XmlElement& xml)
+{
+    // Same ranges as the UI controls, so a damaged file cannot produce odd values.
+    startBpm = juce::jlimit (30.0, 300.0, xml.getDoubleAttribute ("bpm", startBpm.load()));
+    beatsPerBar = juce::jlimit (1, 12, xml.getIntAttribute ("beatsPerBar", beatsPerBar.load()));
+    accentFirstBeat = xml.getBoolAttribute ("accentFirstBeat", accentFirstBeat.load());
+    gain = juce::jlimit (0.0f, 2.0f, (float) xml.getDoubleAttribute ("gain", gain.load()));
+    subdivision = juce::jlimit (0, 3, xml.getIntAttribute ("subdivision", subdivision.load()));
+    sound = juce::jlimit (0, 2, xml.getIntAttribute ("sound", sound.load()));
+    subdivisionLevel = juce::jlimit (0.0f, 1.0f, (float) xml.getDoubleAttribute ("subdivisionLevel", subdivisionLevel.load()));
+    swing = juce::jlimit (0.5, 0.75, xml.getDoubleAttribute ("swing", swing.load()));
+    followSong = xml.getBoolAttribute ("followSong", followSong.load());
+    trainerEnabled = xml.getBoolAttribute ("trainer", trainerEnabled.load());
+    trainerStepBpm = juce::jlimit (-20.0, 20.0, xml.getDoubleAttribute ("trainerStepBpm", trainerStepBpm.load()));
+    trainerInterval = juce::jlimit (0.5, 60.0, xml.getDoubleAttribute ("trainerInterval", trainerInterval.load()));
+    trainerUnit = juce::jlimit (0, 1, xml.getIntAttribute ("trainerUnit", trainerUnit.load()));
+    trainerMaxBpm = juce::jlimit (30.0, 300.0, xml.getDoubleAttribute ("trainerMaxBpm", trainerMaxBpm.load()));
+}
+
 namespace
 {
     float decayPerSample (double seconds, double sampleRate)

@@ -55,7 +55,8 @@ public:
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void beginBlock (juce::int64 blockStart, int numSamples) override;
-    void timerCallback() override;      // keeps the looper's latency compensation current
+    void timerCallback() override;      // keeps the looper's latency compensation current, saves metronome.xml
+    void saveMetronomeIfChanged();
     void performFootswitchAction (FootswitchAction, double pressSeconds);
 
     /** Name of the system default output for the current device type ("" if unknown). */
@@ -66,6 +67,7 @@ private:
     // and true again when they pick the current default.
     bool followSystemOutput = true;
     juce::String lastOutputName;
+    juce::String savedMetronomeSettings;
 
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
 

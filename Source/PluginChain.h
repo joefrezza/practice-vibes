@@ -16,7 +16,7 @@ namespace pv
           -> [looper, after FX: records the processed guitar,    |
               plays "after FX" loops]  ----------------------------+-> master (meter) -> device output
         other sources (song player, metronome...)  ---------------+
-        drum machine (instrument plugin) -> drums stage (gain) ---+
+        MIDI input -> drum machine (instrument plugin) -> drums stage (gain) ---+
 
     The drum machine sits outside the guitar path: monitoring off does not mute it and
     the looper does not record it. Every plugin gets the play head set with setPlayHead().
@@ -70,6 +70,11 @@ public:
     juce::String getDrumPluginName() const;
     juce::String getDrumPluginIdentifier() const;      // PluginDescription::createIdentifierString(), "" if none
     GainMeterProcessor& getDrumStage() const;
+
+    /** Any thread (meant for the MIDI input thread): queues a message for the drum plugin, so sample
+        players (Sitala, Numa...) can be played from a pad or keyboard. Dropped when there is no
+        drum plugin, it does not take MIDI, or the audio device is not running. */
+    void sendDrumMidi (const juce::MidiMessage&);
 
     /** The transport every plugin sees (see BarClockPlayHead). Must outlive the chain. */
     void setPlayHead (juce::AudioPlayHead* playHead)   { graph.setPlayHead (playHead); }
@@ -142,8 +147,18 @@ private:
             owner.player.audioDeviceIOCallbackWithContext (ins, numIns, outs, numOuts, numSamples, context);
         }
 
-        void audioDeviceAboutToStart (juce::AudioIODevice* device) override    { owner.player.audioDeviceAboutToStart (device); }
-        void audioDeviceStopped() override                                      { owner.player.audioDeviceStopped(); }
+        void audioDeviceAboutToStart (juce::AudioIODevice* device) override
+        {
+            owner.player.audioDeviceAboutToStart (device);      // also prepares the MIDI collector
+            owner.audioRunning = true;
+        }
+
+        void audioDeviceStopped() override
+        {
+            owner.audioRunning = false;
+            owner.player.audioDeviceStopped();
+        }
+
         void audioDeviceError (const juce::String& message) override            { owner.player.audioDeviceError (message); }
 
         PluginChain& owner;
@@ -154,8 +169,9 @@ private:
     juce::AudioProcessorPlayer player;
     DeviceCallback deviceCallback { *this };
     std::atomic<BlockListener*> blockListener { nullptr };
+    std::atomic<bool> audioRunning { false }, drumsTakeMidi { false };
 
-    NodePtr audioInNode, audioOutNode, inputStageNode, outputStageNode, masterNode;
+    NodePtr midiInNode, audioInNode, audioOutNode, inputStageNode, outputStageNode, masterNode;
     NodePtr looperBeforeNode, looperAfterNode, drumStageNode;
     std::vector<Slot> slots;
     Slot drums;                         // node == nullptr when empty

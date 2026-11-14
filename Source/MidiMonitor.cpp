@@ -3,8 +3,8 @@
 namespace pv
 {
 
-MidiMonitor::MidiMonitor (juce::AudioDeviceManager& dm)
-    : deviceManager (dm)
+MidiMonitor::MidiMonitor (juce::AudioDeviceManager& dm, std::function<void (const juce::MidiMessage&)> realtimeCallback)
+    : deviceManager (dm), realtime (std::move (realtimeCallback))
 {
     deviceManager.addMidiInputDeviceCallback ({}, this);   // {} = all enabled inputs
 
@@ -54,6 +54,9 @@ void MidiMonitor::handleIncomingMidiMessage (juce::MidiInput* source, const juce
 {
     if (message.isActiveSense() || message.isMidiClock())
         return;
+
+    if (realtime)
+        realtime (message);
 
     const auto sourceName = source != nullptr ? source->getName() : juce::String ("unknown");
     std::weak_ptr<bool> weakAlive = alive;

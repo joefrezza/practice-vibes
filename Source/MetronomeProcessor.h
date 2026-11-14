@@ -60,6 +60,11 @@ public:
     std::atomic<int> trainerUnit { (int) IntervalUnit::minutes };
     std::atomic<double> trainerMaxBpm { 160.0 };
 
+    /** The user's settings above (tempo, meter, sounds, volumes, swing, trainer, follow song), for
+        metronome.xml. clicksMuted is not included (the Looper tab saves it). Message thread. */
+    std::unique_ptr<juce::XmlElement> createSettingsXml() const;
+    void applySettingsXml (const juce::XmlElement&);
+
     /** "Follow song": while the player plays, click on the song's detected beats (and bars)
         instead of a fixed tempo. Needs setPlayer() and a beat grid. */
     std::atomic<bool> followSong { false };

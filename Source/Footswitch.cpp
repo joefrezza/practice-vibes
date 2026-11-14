@@ -176,8 +176,40 @@ void Footswitch::forget (int index)
 
 void Footswitch::changed()
 {
+    publish();
+
     if (onChange)
         onChange();
+}
+
+int Footswitch::encode (const MidiTrigger& t) noexcept
+{
+    return t.isValid() ? ((int) t.type << 16) | (t.channel << 8) | t.number : 0;
+}
+
+void Footswitch::publish()
+{
+    for (int i = 0; i < numSwitches; ++i)
+        publishedTriggers[(size_t) i] = encode (switches[(size_t) i].trigger);
+
+    publishedLearning = learning >= 0 || pending >= 0;
+}
+
+bool Footswitch::isFootswitchMessage (const juce::MidiMessage& message) const noexcept
+{
+    const auto code = encode (MidiTrigger::fromMessage (message));
+
+    if (code == 0)
+        return false;
+
+    if (publishedLearning.load())
+        return true;
+
+    for (auto& published : publishedTriggers)
+        if (published.load() == code)
+            return true;
+
+    return false;
 }
 
 //==============================================================================
@@ -410,6 +442,8 @@ void Footswitch::fromXml (const juce::XmlElement& xml)
         sw.tap = FootswitchAction::fromString (e->getStringAttribute ("tap", sw.tap.toString()));
         sw.hold = FootswitchAction::fromString (e->getStringAttribute ("hold", sw.hold.toString()));
     }
+
+    publish();
 }
 
 } // namespace pv

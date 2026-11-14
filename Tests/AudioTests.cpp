@@ -1279,6 +1279,75 @@ namespace
         }
     }
 
+    void testDrumMidiFilter()
+    {
+        std::cout << "Drum MIDI filter" << std::endl;
+        auto cc = [] (int number, int value) { return juce::MidiMessage::controllerEvent (1, number, value); };
+        const auto note = juce::MidiMessage::noteOn (10, 36, (juce::uint8) 100);
+
+        Footswitch fs;
+        check (! fs.isFootswitchMessage (cc (20, 127)) && ! fs.isFootswitchMessage (note), "nothing learned: all MIDI reaches the drums");
+
+        fs.startLearning (0);
+        check (fs.isFootswitchMessage (note), "while learning, the pedal's press stays away from the drums");
+        fs.handleMidi (cc (20, 127), 1.0);
+        check (fs.isFootswitchMessage (cc (20, 127)), "still checking for a release: held back");
+        fs.handleMidi (cc (20, 0), 1.1);
+        check (fs.isFootswitchMessage (cc (20, 127)) && fs.isFootswitchMessage (cc (20, 0)), "learned CC (press and release) is the pedal's");
+        check (! fs.isFootswitchMessage (cc (21, 127)) && ! fs.isFootswitchMessage (note), "other CCs and notes reach the drums");
+        check (! fs.isFootswitchMessage (juce::MidiMessage::pitchWheel (1, 9000)), "pitch bend reaches the drums");
+
+        Footswitch loaded;
+        loaded.fromXml (*fs.toXml());
+        check (loaded.isFootswitchMessage (cc (20, 127)), "filter works after loading the settings");
+
+        fs.forget (0);
+        check (! fs.isFootswitchMessage (cc (20, 127)), "forgotten switch: its CC reaches the drums again");
+    }
+
+    void testMetronomeSettings()
+    {
+        std::cout << "Metronome settings" << std::endl;
+        MetronomeProcessor a;
+        a.startBpm = 87.0;
+        a.beatsPerBar = 7;
+        a.gain = 0.35f;
+        a.subdivision = (int) MetronomeProcessor::Subdivision::sixteenths;
+        a.sound = (int) MetronomeProcessor::Sound::drums;
+        a.subdivisionLevel = 0.2f;
+        a.swing = 0.67;
+        a.followSong = true;
+        a.trainerEnabled = true;
+        a.trainerStepBpm = 3.0;
+        a.trainerInterval = 8.0;
+        a.trainerUnit = (int) MetronomeProcessor::IntervalUnit::bars;
+        a.trainerMaxBpm = 140.0;
+        a.clicksMuted = true;
+
+        MetronomeProcessor b;
+        b.applySettingsXml (*juce::parseXML (a.createSettingsXml()->toString()));
+        check (b.startBpm.load() == 87.0 && b.beatsPerBar.load() == 7 && std::abs (b.gain.load() - 0.35f) < 1.0e-6f
+                   && b.subdivision.load() == a.subdivision.load() && b.sound.load() == a.sound.load()
+                   && std::abs (b.subdivisionLevel.load() - 0.2f) < 1.0e-6f && b.swing.load() == 0.67
+                   && b.followSong.load() && b.trainerEnabled.load() && b.trainerStepBpm.load() == 3.0
+                   && b.trainerInterval.load() == 8.0 && b.trainerUnit.load() == a.trainerUnit.load()
+                   && b.trainerMaxBpm.load() == 140.0,
+               "every setting survives a save / load");
+        check (! b.clicksMuted.load(), "Mute clicks is not part of it (looper.xml has it)");
+
+        MetronomeProcessor c;
+        juce::XmlElement bad ("PRACTICE_VIBES_METRONOME");
+        bad.setAttribute ("bpm", 5000.0);
+        bad.setAttribute ("beatsPerBar", 0);
+        bad.setAttribute ("swing", 3.0);
+        c.applySettingsXml (bad);
+        check (c.startBpm.load() == 300.0 && c.beatsPerBar.load() == 1 && c.swing.load() == 0.75, "out-of-range values are clamped");
+
+        MetronomeProcessor d;
+        d.applySettingsXml (juce::XmlElement ("PRACTICE_VIBES_METRONOME"));
+        check (d.startBpm.load() == 100.0 && d.sound.load() == (int) MetronomeProcessor::Sound::beep, "missing values keep the defaults");
+    }
+
     void testLatencyCalibration()
     {
         std::cout << "Latency calibration" << std::endl;
@@ -1364,6 +1433,8 @@ int main()
     testLooper();
     testPlayHead();
     testFootswitch();
+    testDrumMidiFilter();
+    testMetronomeSettings();
     testLatencyCalibration();
     testLoopFiles();
 

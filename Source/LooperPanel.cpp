@@ -387,7 +387,8 @@ LooperPanel::LooperPanel (AppEngine& e)
     styleLabel (drumsLabel, "Drums");
     styleLabel (drumStatus, {}, 0.6f);
     drumBox.setTooltip ("An instrument plugin with its own patterns (drum machine, groove player). "
-                        "It plays with the metronome: same tempo and bars, starts and stops with it.");
+                        "It plays with the metronome: same tempo and bars, starts and stops with it. "
+                        "Notes from MIDI pads or keyboards go to it too (not the footswitch's own messages).");
     drumBox.onChange = [this] { drumChosen(); };
     drumEditButton.onClick = [this] { openDrumEditor(); };
 
@@ -892,7 +893,12 @@ void LooperPanel::timerCallback()
     else if (drumStatus.getText().startsWith ("Could not"))
         status = drumStatus.getText();
     else if (hasDrums)
+    {
         status = metronome.isRunning() ? "Playing along with the metronome" : "Starts and stops with the metronome";
+
+        if (engine.chain->getDrumPlugin()->acceptsMidi())
+            status << " - plays MIDI notes";
+    }
     else if (drumEntries.empty())
         status = engine.catalogue->canScan() ? "No instruments found: Scan VST3 in the Guitar rig tab" : "No instrument plugins found";
 

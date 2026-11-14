@@ -39,6 +39,7 @@ namespace
 PluginChain::PluginChain (juce::AudioDeviceManager& dm, juce::AudioPluginFormatManager& fm)
     : deviceManager (dm), formatManager (fm)
 {
+    midiInNode      = graph.addNode (std::make_unique<IOProcessor> (IOProcessor::midiInputNode));
     audioInNode     = graph.addNode (std::make_unique<IOProcessor> (IOProcessor::audioInputNode));
     audioOutNode    = graph.addNode (std::make_unique<IOProcessor> (IOProcessor::audioOutputNode));
     inputStageNode  = graph.addNode (std::make_unique<GainMeterProcessor> ("Input stage", 1));
@@ -67,6 +68,7 @@ PluginChain::~PluginChain()
     sources.clear();
     drums = {};
     drumStageNode = nullptr;
+    midiInNode = nullptr;
     looperBeforeNode = nullptr;
     looperAfterNode = nullptr;
     graph.clear();
@@ -173,6 +175,21 @@ void PluginChain::removeDrumPlugin()
     drums = {};
     rebuildConnections();
     notifyChange();
+}
+
+void PluginChain::sendDrumMidi (const juce::MidiMessage& message)
+{
+    if (! drumsTakeMidi.load() || ! audioRunning.load())
+        return;
+
+    // The collector places messages in the block by their timestamp (same clock as MIDI input).
+    auto copy = message;
+    const auto now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
+    if (copy.getTimeStamp() <= 0.0 || copy.getTimeStamp() > now)
+        copy.setTimeStamp (now);
+
+    player.getMidiMessageCollector().addMessageToQueue (copy);
 }
 
 juce::AudioPluginInstance* PluginChain::getDrumPlugin() const
@@ -376,6 +393,8 @@ void PluginChain::rebuildConnections()
         }
     }
 
+    auto drumsTakeMidiNow = false;
+
     if (drums.node != nullptr)
     {
         // Only the outputs: an instrument's (sidechain) inputs stay silent.
@@ -383,7 +402,17 @@ void PluginChain::rebuildConnections()
 
         for (int c = 0; c < 2 && outs > 0; ++c)
             connect (drums.node->nodeID, juce::jmin (c, outs - 1), drumStageNode->nodeID, c);
+
+        // MIDI from the controllers goes to the drum plugin only (the guitar plugins get none).
+        if (drums.node->getProcessor()->acceptsMidi())
+        {
+            connect (midiInNode->nodeID, juce::AudioProcessorGraph::midiChannelIndex,
+                     drums.node->nodeID, juce::AudioProcessorGraph::midiChannelIndex);
+            drumsTakeMidiNow = true;
+        }
     }
+
+    drumsTakeMidi = drumsTakeMidiNow;
 
     for (int c = 0; c < 2; ++c)
         connect (drumStageNode->nodeID, c, masterNode->nodeID, c);
