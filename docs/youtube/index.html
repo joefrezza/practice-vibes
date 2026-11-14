@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Practice Vibes - YouTube player</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #player { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  #note { color: #aaa; font: 15px system-ui, sans-serif; padding: 24px; }
+</style>
+</head>
+<body>
+<div id="player"><p id="note">Loading the YouTube player...</p></div>
+<script>
+// Helper page for the Practice Vibes app (https://github.com/joefrezza/practice-vibes).
+// It hosts YouTube's official embedded player (IFrame Player API, privacy-enhanced mode) and talks to the app
+// through the app's web view bridge (window.__JUCE__). It stores nothing and sends nothing anywhere else.
+// Opened in a normal browser it simply plays the video given as ?v=<id>&start=<seconds>.
+(function () {
+  "use strict";
+
+  var query = new URLSearchParams(location.search);
+  var backend = window.__JUCE__ && window.__JUCE__.backend;
+  var player = null, ready = false, tickCount = 0;
+  var loop = { a: 0, b: 0, on: false };
+
+  function send(message) {
+    if (backend && backend.emitEvent)
+      backend.emitEvent("pvYouTube", message);
+  }
+
+  function num(x) { return typeof x === "number" && isFinite(x) ? x : 0; }
+
+  function state() {
+    if (! player || ! ready) return;
+    var data = player.getVideoData ? player.getVideoData() : {};
+    send({
+      type: "state",
+      time: num(player.getCurrentTime()),
+      duration: num(player.getDuration()),
+      playerState: num(player.getPlayerState()),
+      rate: num(player.getPlaybackRate()),
+      rates: player.getAvailablePlaybackRates ? player.getAvailablePlaybackRates() : [1],
+      title: (data && data.title) || "",
+      videoId: (data && data.video_id) || ""
+    });
+  }
+
+  function tick() {
+    if (! player || ! ready) return;
+
+    if (loop.on && loop.b > loop.a && player.getPlayerState() === YT.PlayerState.PLAYING) {
+      var t = player.getCurrentTime();
+      if (t >= loop.b || t < loop.a - 0.5)
+        player.seekTo(loop.a, true);
+    }
+
+    if (++tickCount % 2 === 0)   // state every 100 ms, loop check every 50 ms
+      state();
+  }
+
+  window.pv = {
+    load: function (id, start) { if (player && ready) player.cueVideoById({ videoId: id, startSeconds: start || 0 }); },
+    play: function () { if (player && ready) player.playVideo(); },
+    pause: function () { if (player && ready) player.pauseVideo(); },
+    seek: function (t) { if (player && ready) player.seekTo(Math.max(0, t), true); },
+    rate: function (r) { if (player && ready) player.setPlaybackRate(r); },
+    volume: function (v) { if (player && ready) { player.setVolume(Math.round(Math.max(0, Math.min(100, v)))); player.unMute(); } },
+    loop: function (a, b, on) { loop = { a: a, b: b, on: !! on }; }
+  };
+
+  window.onYouTubeIframeAPIReady = function () {
+    var id = query.get("v") || "";
+
+    if (! /^[A-Za-z0-9_-]{6,20}$/.test(id)) {
+      document.getElementById("note").textContent = "No video given.";
+      send({ type: "error", code: 2 });
+      return;
+    }
+
+    player = new YT.Player("player", {
+      host: "https://www.youtube-nocookie.com",
+      videoId: id,
+      playerVars: {
+        start: Math.max(0, parseInt(query.get("start") || "0", 10) || 0),
+        playsinline: 1,
+        rel: 0,
+        controls: 1,
+        enablejsapi: 1,
+        origin: location.origin
+      },
+      events: {
+        onReady: function () { ready = true; send({ type: "ready" }); state(); },
+        onStateChange: function () { state(); },
+        onPlaybackRateChange: function () { state(); },
+        onError: function (e) { send({ type: "error", code: num(e.data) }); }
+      }
+    });
+
+    setInterval(tick, 50);
+  };
+})();
+</script>
+<script src="https://www.youtube.com/iframe_api"></script>
+</body>
+</html>
