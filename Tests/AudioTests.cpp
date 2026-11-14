@@ -1590,6 +1590,204 @@ namespace
         check (FootswitchAction::fromString (FootswitchAction { FootswitchAction::Kind::tuner, 0 }.toString()).kind
                    == FootswitchAction::Kind::tuner, "footswitch tuner action round trip");
     }
+
+    /** Six plucked strings, string i starting 15 ms after string i-1, after `silence` seconds. */
+    std::vector<float> makeStrum (double rate, const std::array<float, 6>& frequencies, const std::array<float, 6>& gains,
+                                  double silence, double seconds)
+    {
+        std::vector<float> out ((size_t) (rate * (silence + seconds)), 0.0f);
+        const float harmonics[] = { 1.0f, 0.6f, 0.4f, 0.25f, 0.15f, 0.1f };
+        juce::Random random (3);
+
+        for (size_t s = 0; s < 6; ++s)
+        {
+            const auto start = (size_t) ((silence + 0.015 * (double) s) * rate);
+
+            for (size_t i = start; i < out.size(); ++i)
+            {
+                const auto t = (double) (i - start) / rate;
+                double v = 0.0;
+
+                for (int h = 0; h < 6; ++h)
+                    v += harmonics[h] * std::sin (juce::MathConstants<double>::twoPi * frequencies[s] * (h + 1) * t + h);
+
+                out[i] += (float) (0.06 * gains[s] * v * std::exp (-t / 2.0));
+            }
+        }
+
+        for (auto& v : out)
+            v += 0.0005f * (random.nextFloat() * 2.0f - 1.0f);
+
+        return out;
+    }
+
+    void testTunings()
+    {
+        std::cout << "Tunings and strum check" << std::endl;
+
+        {
+            juce::StringArray names;
+
+            for (auto& t : tuningPresets())
+                names.addIfNotAlreadyThere (t.name);
+
+            check (names.size() == (int) tuningPresets().size() && tuningName (tuningPresets().front().strings) == "Standard",
+                   "tuning presets have unique names, standard first");
+            check (tuningName ({ 38, 45, 50, 55, 59, 64 }) == "Drop D" && tuningName ({ 40, 45, 50, 55, 59, 65 }) == "Custom",
+                   "tuning names are found, others are custom");
+
+            float away = 0.0f;
+            const StringNotes dropD { 38, 45, 50, 55, 59, 64 };
+            const auto s = nearestString (dropD, 82.41f, 440.0f, away);
+            check (s == 0 && std::abs (away - 200.0f) < 1.0f, "E2 in drop D: low string, 2 semitones sharp");
+            check (nearestString (dropD, 147.5f, 440.0f, away) == 2 && std::abs (away - 8.0f) < 1.0f, "D3 +8 cents: 4th string");
+            check (nearestString (dropD, 1000.0f, 440.0f, away) == -1, "far above every string: none");
+        }
+
+        {
+            Tuner tuner;
+            tuner.strings = { 36, 43, 48, 55, 60, 64 };
+            tuner.strobe = true;
+            tuner.strumMode = true;
+            Tuner copy;
+            copy.fromXml (*tuner.toXml());
+            check (copy.strings == tuner.strings && copy.strobe && copy.strumMode, "tuning and view settings round trip");
+
+            juce::XmlElement bad ("TUNER");
+            bad.setAttribute ("strings", "40 45 50 55 59");
+            copy.fromXml (bad);
+            check (copy.strings == tuningPresets().front().strings && ! copy.strobe, "bad string list falls back to standard");
+            bad.setAttribute ("strings", "40 45 50 55 59 120");
+            copy.fromXml (bad);
+            check (copy.strings == tuningPresets().front().strings, "out-of-range string note falls back to standard");
+        }
+
+        const std::array<float, 6> detune { -12.0f, 6.0f, 0.0f, -4.0f, 9.0f, -7.0f };
+
+        for (auto [rate, tuningIndex] : { std::pair { 48000.0, 0 }, std::pair { 44100.0, 3 }, std::pair { 96000.0, 6 } })
+        {
+            const auto& tuning = tuningPresets()[(size_t) tuningIndex];
+            std::array<float, 6> freqs {};
+
+            for (size_t i = 0; i < 6; ++i)
+                freqs[i] = noteFrequency (tuning.strings[i], 440.0f) * std::pow (2.0f, detune[i] / 1200.0f);
+
+            const auto strum = makeStrum (rate, freqs, { 1, 1, 1, 1, 1, 1 }, 0.4, 1.5);
+            Tuner tuner;
+            tuner.strings = tuning.strings;
+            tuner.active = true;
+
+            std::optional<StrumResult> result;
+            int calls = 0, resultAt = -1;
+            const int block = 512;
+
+            for (size_t pos = 0; pos + block <= strum.size(); pos += block)
+            {
+                tuner.push (strum.data() + pos, block, rate);
+
+                if (++calls % 3 == 0)       // the UI polls every few blocks
+                    if (auto r = tuner.readStrum(); r && ! result)
+                    {
+                        result = r;
+                        resultAt = (int) pos;
+                    }
+            }
+
+            float worst = 0.0f;
+            bool allHeard = result.has_value();
+
+            if (result)
+                for (size_t i = 0; i < 6; ++i)
+                {
+                    allHeard = allHeard && (*result)[i].heard;
+                    worst = juce::jmax (worst, std::abs ((*result)[i].cents - detune[i]));
+                }
+
+            const auto delay = resultAt / rate - 0.4;
+            check (allHeard && worst < 1.5f, juce::String (tuning.name) + " strum at " + juce::String (rate, 0)
+                                             + " Hz: six strings within 1.5 cents (worst " + juce::String (worst, 2) + ")");
+            check (result && delay > 0.5 && delay < 0.8, "strum result arrives "
+                                                          + juce::String (delay, 2) + " s after the strum");
+        }
+
+        {
+            // One string muted, one detuned by more than the search range, then a second strum.
+            const auto& standard = tuningPresets().front().strings;
+            std::array<float, 6> freqs {};
+
+            for (size_t i = 0; i < 6; ++i)
+                freqs[i] = noteFrequency (standard[i], 440.0f);
+
+            freqs[4] *= std::pow (2.0f, 80.0f / 1200.0f);       // B string far sharp, near E2's 3rd harmonic
+            auto strum = makeStrum (48000.0, freqs, { 1, 1, 0, 1, 1, 1 }, 0.3, 1.2);
+            freqs[4] = noteFrequency (standard[4], 440.0f);
+            const auto second = makeStrum (48000.0, freqs, { 1, 1, 1, 1, 1, 1 }, 0.0, 1.2);
+            strum.insert (strum.end(), second.begin(), second.end());
+
+            Tuner tuner;
+            tuner.active = true;
+            std::vector<StrumResult> results;
+
+            for (size_t pos = 0; pos + 512 <= strum.size(); pos += 512)
+            {
+                tuner.push (strum.data() + pos, 512, 48000.0);
+
+                if (auto r = tuner.readStrum())
+                    results.push_back (*r);
+            }
+
+            check (results.size() == 2, "two strums give two results (" + juce::String ((int) results.size()) + ")");
+
+            if (results.size() == 2)
+            {
+                check (! results[0][2].heard && results[0][0].heard && results[0][5].heard, "muted string is not heard");
+                check (results[0][4].heard && std::abs (results[0][4].cents - 80.0f) < 3.0f,
+                       "B string 80 cents sharp reads " + juce::String (results[0][4].cents, 1) + ", not E2's harmonic");
+                bool all = true;
+
+                for (auto& r : results[1])
+                    all = all && r.heard && std::abs (r.cents) < 1.5f;
+
+                check (all, "second strum: all six in tune");
+            }
+
+            std::vector<float> quiet (48000 * 2);
+            juce::Random random (5);
+
+            for (auto& v : quiet)
+                v = 0.002f * (random.nextFloat() * 2.0f - 1.0f);
+
+            Tuner idle;
+            idle.active = true;
+            bool any = false;
+
+            for (size_t pos = 0; pos + 512 <= quiet.size(); pos += 512)
+            {
+                idle.push (quiet.data() + pos, 512, 48000.0);
+                any = any || idle.readStrum().has_value();
+            }
+
+            check (! any, "hiss alone never counts as a strum");
+
+            // A loud noise burst (a knock, a cable being plugged in) is not a strum either.
+            std::vector<float> burst (48000 * 2, 0.0f);
+
+            for (size_t i = 14400; i < burst.size(); ++i)
+                burst[i] = 0.2f * (random.nextFloat() * 2.0f - 1.0f) * std::exp (-(float) (i - 14400) / 48000.0f);
+
+            Tuner knocked;
+            knocked.active = true;
+            any = false;
+
+            for (size_t pos = 0; pos + 512 <= burst.size(); pos += 512)
+            {
+                knocked.push (burst.data() + pos, 512, 48000.0);
+                any = any || knocked.readStrum().has_value();
+            }
+
+            check (! any, "a noise burst gives no strum result");
+        }
+    }
 }
 
 int main()
@@ -1611,6 +1809,7 @@ int main()
     testLatencyCalibration();
     testLoopFiles();
     testTuner();
+    testTunings();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

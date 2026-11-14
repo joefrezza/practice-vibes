@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
 #include "AudioTap.h"
+#include <optional>
 
 namespace pv
 {
@@ -75,6 +76,71 @@ private:
     float shown = 0.0f;
 };
 
+/** Six guitar strings, low to high, as MIDI notes. */
+using StringNotes = std::array<int, 6>;
+
+struct Tuning
+{
+    const char* name;
+    StringNotes strings;
+};
+
+/** The built-in tunings; the first one is standard. */
+const std::vector<Tuning>& tuningPresets();
+
+/** Preset name for these strings, or "Custom". */
+juce::String tuningName (const StringNotes&);
+
+/** Frequency of a MIDI note for this A4 reference. */
+float noteFrequency (int midiNote, float referenceA4) noexcept;
+
+/** The string whose open note is closest to `frequency` (index 0 = low string), and how far
+    away in cents (+ = sharp). -1 when no string is within maxCents. */
+int nearestString (const StringNotes&, float frequency, float referenceA4, float& centsAway, float maxCents = 350.0f);
+
+/** One string in a strum check. */
+struct StringReading
+{
+    bool heard = false;
+    float frequency = 0.0f;
+    float cents = 0.0f;         // from the string's target note (+ = sharp)
+};
+
+using StrumResult = std::array<StringReading, 6>;
+
+/** Polyphonic check of all six open strings at once: we know which notes to expect, so a long
+    FFT is searched for a peak near each string's target (its 2nd harmonic if the fundamental is
+    weak and the harmonic is not shared with another string). Not thread-safe.
+*/
+class StrumAnalyser
+{
+public:
+    static constexpr double windowSeconds = 0.5;
+    static constexpr float searchCents = 95.0f;         // how far from the target a string is looked for
+    static constexpr float relativeFloorDb = -36.0f;    // a string quieter than this vs. the loudest is "not heard"
+    static constexpr float minProminence = 6.0f;        // peak vs. the median of its band (noise reaches ~3)
+
+    StrumAnalyser();
+
+    static int samplesNeeded (double sampleRate) noexcept;
+
+    /** Analyses the last samplesNeeded() samples of `samples`. Nothing is heard unless at
+        least three strings are. */
+    StrumResult analyse (const float* samples, int numSamples, double sampleRate,
+                         const StringNotes&, float referenceA4);
+
+private:
+    struct Peak { float frequency = 0.0f, magnitude = 0.0f; };
+    Peak findPeak (float target, double binHz) const;
+
+    /** Best frequency for a partial near `start` in the band around `target`, given the other
+        strings' partials (Hz) in that band. Uses the complex spectrum left by analyse(). */
+    Peak fitPartial (int windowLength, double rate, float target, double start, const std::vector<double>& others) const;
+
+    juce::dsp::FFT fft;
+    std::vector<float> window, spectrum, magnitude;
+};
+
 /** Chromatic tuner: the guitar input stage pushes the dry signal into a ring buffer while the
     tuner is active; the UI calls read() on the message thread a few dozen times per second.
 */
@@ -89,22 +155,35 @@ public:
     // Settings (message thread), saved in tuner.xml.
     float referenceA4 = 440.0f;             // 430..450
     bool muteWhileTuning = true;            // silence the guitar output while the tuner is open
+    StringNotes strings = tuningPresets().front().strings;
+    bool strobe = false;                    // strobe band instead of the needle
+    bool strumMode = false;                 // check all six strings at once
 
     static constexpr float minReference = 430.0f, maxReference = 450.0f;
+    static constexpr int minStringNote = 28, maxStringNote = 76;    // E1 .. E5 (baritone to high strings)
 
     void push (const float* samples, int numSamples, double sampleRate) noexcept override;
 
     /** Message thread: analyses the most recent audio. Invalid until enough audio has arrived. */
     PitchReading read();
 
+    /** Message thread, strum mode: watches for a strum and, once enough of it has rung, returns
+        the per-string result (empty otherwise). A new strum while waiting restarts the wait. */
+    std::optional<StrumResult> readStrum();
+
+    /** Message thread: true between a detected strum and its result. */
+    bool isStrumPending() const noexcept    { return strumOnset >= 0; }
+
     /** Forget buffered audio (call when the tuner opens, so no stale note is shown). */
     void clear();
+
+    static constexpr double strumSettleSeconds = 0.12;     // skip the pick attack
 
     std::unique_ptr<juce::XmlElement> toXml() const;
     void fromXml (const juce::XmlElement&);
 
 private:
-    static constexpr int ringSize = 1 << 15;     // > samplesNeeded() at 192 kHz (16384)
+    static constexpr int ringSize = 1 << 17;     // > strum window + settle at 192 kHz (~119k)
 
     // The writer never laps the reader in practice: a read copies at most 16384 samples
     // and would have to be stalled for ~16k more samples to be overwritten.
@@ -112,6 +191,14 @@ private:
     std::atomic<juce::int64> written { 0 };
     std::atomic<double> rate { 0.0 };
     juce::int64 clearedAt = 0;      // message thread: `written` when clear() was called
+
+    // Strum onset detection (message thread): RMS of fixed chunks scanned since the last call.
+    juce::int64 strumScanned = 0, strumOnset = -1;
+    std::array<float, 32> chunkLevels {};     // ~170 ms of 256-sample chunks at 48 kHz
+    int chunkCount = 0, chunkNext = 0;
+    std::array<float, 4> chunkEnergies {};
+    int energyCount = 0, energyNext = 0;
+    StrumAnalyser strumAnalyser;
 
     std::vector<float> scratch;
     PitchDetector detector;
