@@ -26,6 +26,7 @@ public:
     std::function<void (const juce::String&, std::unique_ptr<juce::Component>)> showOverlay;
     std::function<void()> hideOverlay;
     std::function<void (const juce::File&)> onOpenAudio;
+    std::function<void (const YouTubeLink&, const juce::String& title)> onOpenYouTube;
 
     /** Writes any pending edit to disk (also called when the app quits). */
     void flush();

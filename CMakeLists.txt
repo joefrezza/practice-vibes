@@ -86,7 +86,8 @@ target_sources(PracticeVibes PRIVATE
     Source/RigPanel.cpp
     Source/Tuner.cpp
     Source/TunerPanel.cpp
-    Source/WaveformView.cpp)
+    Source/WaveformView.cpp
+    Source/YouTubePlayer.cpp)
 
 target_compile_definitions(PracticeVibes PRIVATE
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:PracticeVibes,JUCE_PRODUCT_NAME>"

@@ -1,5 +1,6 @@
 #include "PracticePanel.h"
 #include "Theme.h"
+#include "YouTubePlayer.h"
 
 namespace pv
 {
@@ -43,6 +44,84 @@ public:
 private:
     MetronomeProcessor& metronome;
     int lastBeat = -1, lastBeats = 4;
+};
+
+//==============================================================================
+/** Thin timeline under a YouTube video: position, A-B region; tap to jump, drag to set a loop. */
+class PracticePanel::YouTubeTimeline final : public juce::Component
+{
+public:
+    explicit YouTubeTimeline (PracticePanel& p) : owner (p) {}
+
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (0.0f, 4.0f);
+        g.setColour (theme::panel);
+        g.fillRoundedRectangle (r, 4.0f);
+
+        const auto duration = duration_();
+
+        if (duration <= 0.0)
+            return;
+
+        auto xOf = [&] (double t) { return r.getX() + (float) (juce::jlimit (0.0, 1.0, t / duration) * r.getWidth()); };
+
+        if (dragging)
+        {
+            g.setColour (theme::highlight.withAlpha (0.35f));
+            g.fillRect (juce::Rectangle<float>::leftTopRightBottom (xOf (juce::jmin (dragStart, dragEnd)), r.getY(),
+                                                                    xOf (juce::jmax (dragStart, dragEnd)), r.getBottom()));
+        }
+        else if (owner.loopExists())
+        {
+            g.setColour (owner.loopIsEnabled() ? theme::accent.withAlpha (0.55f) : juce::Colours::white.withAlpha (0.15f));
+            g.fillRect (juce::Rectangle<float>::leftTopRightBottom (xOf (owner.loopStartSeconds()), r.getY(),
+                                                                    xOf (owner.loopEndSeconds()), r.getBottom()));
+        }
+
+        g.setColour (juce::Colours::white.withAlpha (0.25f));
+        g.fillRect (juce::Rectangle<float> (r.getX(), r.getCentreY() - 1.0f, xOf (owner.positionSeconds()) - r.getX(), 2.0f));
+        g.setColour (theme::highlight);
+        g.fillRect (juce::Rectangle<float> (xOf (owner.positionSeconds()) - 1.0f, r.getY() - 2.0f, 3.0f, r.getHeight() + 4.0f));
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        dragStart = dragEnd = timeAt (e.x);
+        dragging = false;
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        dragEnd = timeAt (e.x);
+        dragging = e.getDistanceFromDragStart() > 6;
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (dragging && std::abs (dragEnd - dragStart) > 0.2)
+            owner.setLoop (juce::jmin (dragStart, dragEnd), juce::jmax (dragStart, dragEnd), true);
+        else
+            owner.youtube->seek (dragStart);
+
+        dragging = false;
+        owner.updateLoopButtons();
+        repaint();
+    }
+
+private:
+    double duration_() const    { return owner.youtube != nullptr ? owner.youtube->getState().duration : 0.0; }
+
+    double timeAt (int x) const
+    {
+        const auto w = juce::jmax (1, getWidth());
+        return juce::jlimit (0.0, duration_(), duration_() * x / w);
+    }
+
+    PracticePanel& owner;
+    double dragStart = 0.0, dragEnd = 0.0;
+    bool dragging = false;
 };
 
 //==============================================================================
@@ -102,10 +181,39 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
                                                              &chordView, &snapButton })
         addAndMakeVisible (c);
 
+    youTubeTimeline = std::make_unique<YouTubeTimeline> (*this);
+    addChildComponent (*youTubeTimeline);
+    addChildComponent (compactButton);
+    addChildComponent (closeVideoButton);
+    addChildComponent (openOnYouTubeButton);
+    compactButton.setTooltip ("Small floating player that stays on top while you use the other tabs");
+    compactButton.onClick = [this] { if (onCompactRequested) onCompactRequested(); };
+    closeVideoButton.onClick = [this] { closeYouTube(); };
+    openOnYouTubeButton.onClick = [this] { if (youtube != nullptr) juce::URL (youtube->getWatchUrl()).launchInDefaultBrowser(); };
+
     openButton.onClick = [this] { openFile(); };
-    rewindButton.onClick = [this] { player.seekToSeconds (player.isLoopEnabled() ? player.getLoopStartSeconds() : 0.0); };
+    rewindButton.onClick = [this]
+    {
+        const auto target = loopIsEnabled() ? loopStartSeconds() : 0.0;
+
+        if (youTubeMode)
+            youtube->seek (target);
+        else
+            player.seekToSeconds (target);
+    };
     playButton.onClick = [this] { togglePlay(); };
-    stopButton.onClick = [this] { player.stop(); };
+    stopButton.onClick = [this]
+    {
+        if (youTubeMode)
+        {
+            youtube->pause();
+            youtube->seek (loopIsEnabled() ? loopStartSeconds() : 0.0);
+        }
+        else
+        {
+            player.stop();
+        }
+    };
 
     waveform.onSeek = [this] (double seconds) { player.seekToSeconds (seconds); };
     waveform.onLoopEdited = [this] (double start, double end)
@@ -140,19 +248,18 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
 
     setAButton.onClick = [this]
     {
-        pendingLoopStart = waveform.snap (player.getPositionSeconds());
+        pendingLoopStart = youTubeMode ? positionSeconds() : waveform.snap (player.getPositionSeconds());
         setAButton.setButtonText ("A = " + formatTime (pendingLoopStart));
     };
 
     setBButton.onClick = [this]
     {
-        const auto [start, end] = waveform.snapLoop (pendingLoopStart >= 0.0 ? pendingLoopStart : 0.0, player.getPositionSeconds());
+        const auto a = pendingLoopStart >= 0.0 ? pendingLoopStart : 0.0;
+        const auto [start, end] = youTubeMode ? std::pair<double, double> { juce::jmin (a, positionSeconds()), juce::jmax (a, positionSeconds()) }
+                                              : waveform.snapLoop (a, player.getPositionSeconds());
 
         if (end - start > 0.05)
-        {
-            player.setLoopSeconds (start, end);
-            player.setLoopEnabled (true);
-        }
+            setLoop (start, end, true);
 
         pendingLoopStart = -1.0;
         updateLoopButtons();
@@ -161,21 +268,26 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
     loopButton.setClickingTogglesState (true);
     loopButton.onClick = [this]
     {
-        player.setLoopEnabled (loopButton.getToggleState());
+        setLoop (loopStartSeconds(), loopEndSeconds(), loopButton.getToggleState());
         updateLoopButtons();
     };
 
     clearLoopButton.onClick = [this]
     {
-        player.setLoopEnabled (false);
-        player.setLoopSeconds (0.0, 0.0);
+        setLoop (0.0, 0.0, false);
         pendingLoopStart = -1.0;
         updateLoopButtons();
     };
 
     styleLabel (speedLabel, "Speed");
     styleHorizontal (speedSlider, 25.0, 150.0, 1.0, 100.0, " %");
-    speedSlider.onValueChange = [this] { player.setSpeed (speedSlider.getValue() / 100.0); };
+    speedSlider.onValueChange = [this]
+    {
+        if (youTubeMode)
+            youtube->setRate (speedSlider.getValue() / 100.0);
+        else
+            player.setSpeed (speedSlider.getValue() / 100.0);
+    };
 
     styleLabel (pitchLabel, "Pitch");
     styleHorizontal (pitchSlider, -12.0, 12.0, 0.1, 0.0, " st");
@@ -183,7 +295,15 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
 
     styleLabel (songVolumeLabel, "Volume");
     styleHorizontal (songVolumeSlider, -40.0, 6.0, 0.5, 0.0, " dB");
-    songVolumeSlider.onValueChange = [this] { player.gain = juce::Decibels::decibelsToGain ((float) songVolumeSlider.getValue(), -40.0f); };
+    songVolumeSlider.onValueChange = [this]
+    {
+        const auto gain = juce::Decibels::decibelsToGain ((float) songVolumeSlider.getValue(), -40.0f);
+
+        if (youTubeMode)
+            youtube->setVolume (juce::jmin (1.0f, gain));   // YouTube can't go above 100 %
+        else
+            player.gain = gain;
+    };
 
     styleLabel (hintLabel, "Tap the waveform to jump, drag to loop, drag a loop edge to adjust it. Zoom: pinch, or Ctrl+wheel. Double-click a slider to reset it.", 0.45f);
     hintLabel.setMinimumHorizontalScale (0.5f);
@@ -384,6 +504,93 @@ void PracticePanel::startChordAnalysis (std::shared_ptr<const LoadedSong> song)
 }
 
 //==============================================================================
+double PracticePanel::positionSeconds() const   { return youTubeMode ? youtube->getState().time : player.getPositionSeconds(); }
+bool PracticePanel::loopIsEnabled() const       { return youTubeMode ? youtube->isLoopEnabled() : player.isLoopEnabled(); }
+bool PracticePanel::loopExists() const          { return youTubeMode ? youtube->hasLoop() : player.hasLoop(); }
+double PracticePanel::loopStartSeconds() const  { return youTubeMode ? youtube->getLoopStart() : player.getLoopStartSeconds(); }
+double PracticePanel::loopEndSeconds() const    { return youTubeMode ? youtube->getLoopEnd() : player.getLoopEndSeconds(); }
+
+void PracticePanel::setLoop (double start, double end, bool enabled)
+{
+    if (youTubeMode)
+    {
+        youtube->setLoop (start, end, enabled);
+        return;
+    }
+
+    player.setLoopSeconds (start, end);
+    player.setLoopEnabled (enabled);
+}
+
+void PracticePanel::showYouTube()
+{
+    if (youtube == nullptr)
+        return;
+
+    if (player.isPlaying())
+        player.pause();
+
+    youTubeMode = true;
+    pendingLoopStart = -1.0;
+
+    // No audio from YouTube reaches the app: no chords, no beat grid, no pitch shift.
+    if (chordCancel != nullptr)
+        *chordCancel = true;
+
+    metronome.setSongGrid (nullptr);
+    songGridFound = false;
+    updateFollowControls();
+    chordView.setTrack (nullptr, "Chords can't be detected for YouTube videos: the app never receives their audio.");
+
+    pitchSlider.setValue (0.0, juce::dontSendNotification);
+    youtube->setRate (speedSlider.getValue() / 100.0);
+    youtube->setVolume (juce::jmin (1.0f, juce::Decibels::decibelsToGain ((float) songVolumeSlider.getValue(), -40.0f)));
+
+    updateModeVisibility();
+    updateLoopButtons();
+    resized();
+}
+
+void PracticePanel::closeYouTube()
+{
+    if (! youTubeMode)
+        return;
+
+    youTubeMode = false;
+    pendingLoopStart = -1.0;
+
+    if (youtube != nullptr)
+        youtube->unload();
+
+    // Back to the song file (if any): restore its labels, speed and chord analysis.
+    songLabel.setText (shownSong != nullptr ? shownSong->name : juce::String ("No song loaded"), juce::dontSendNotification);
+    player.setSpeed (speedSlider.getValue() / 100.0);
+    player.gain = juce::Decibels::decibelsToGain ((float) songVolumeSlider.getValue(), -40.0f);
+    startChordAnalysis (shownSong);
+
+    updateModeVisibility();
+    updateLoopButtons();
+    resized();
+}
+
+void PracticePanel::updateModeVisibility()
+{
+    for (auto* c : std::initializer_list<juce::Component*> { &waveform, &zoomOutButton, &zoomInButton, &fitButton, &zoomLoopButton, &snapButton })
+        c->setVisible (! youTubeMode);
+
+    youTubeTimeline->setVisible (youTubeMode);
+    compactButton.setVisible (youTubeMode);
+    closeVideoButton.setVisible (youTubeMode);
+    openOnYouTubeButton.setVisible (youTubeMode && youtube != nullptr && youtube->getState().errorCode != 0);
+    pitchSlider.setEnabled (! youTubeMode);
+    pitchLabel.setEnabled (! youTubeMode);
+
+    hintLabel.setText (youTubeMode ? "YouTube: tap the timeline to jump, drag on it to set a loop. Speed snaps to the speeds the video offers."
+                                   : "Tap the waveform to jump, drag to loop, drag a loop edge to adjust it. Zoom: pinch, or Ctrl+wheel. Double-click a slider to reset it.",
+                       juce::dontSendNotification);
+}
+
+//==============================================================================
 juce::String PracticePanel::formatTime (double seconds)
 {
     seconds = juce::jmax (0.0, seconds);
@@ -410,6 +617,7 @@ void PracticePanel::openFile()
 
 void PracticePanel::loadSong (const juce::URL& url)
 {
+    closeYouTube();
     songLabel.setText ("Loading " + juce::URL::removeEscapeChars (url.getFileName()) + "...", juce::dontSendNotification);
     openButton.setEnabled (false);
 
@@ -432,7 +640,9 @@ void PracticePanel::loadSong (const juce::URL& url)
 
 void PracticePanel::togglePlay()
 {
-    if (player.isPlaying())
+    if (youTubeMode)
+        youtube->togglePlay();
+    else if (player.isPlaying())
         player.pause();
     else
         player.play();
@@ -440,14 +650,16 @@ void PracticePanel::togglePlay()
 
 void PracticePanel::updateLoopButtons()
 {
-    loopButton.setEnabled (player.hasLoop());
-    loopButton.setToggleState (player.isLoopEnabled(), juce::dontSendNotification);
-    loopButton.setButtonText (player.hasLoop() ? "Loop " + formatTime (player.getLoopStartSeconds())
-                                                     + " - " + formatTime (player.getLoopEndSeconds())
-                                               : juce::String ("Loop"));
+    loopButton.setEnabled (loopExists());
+    loopButton.setToggleState (loopIsEnabled(), juce::dontSendNotification);
+    loopButton.setButtonText (loopExists() ? "Loop " + formatTime (loopStartSeconds()) + " - " + formatTime (loopEndSeconds())
+                                           : juce::String ("Loop"));
     loopButton.setColour (juce::TextButton::buttonOnColourId, theme::accent);
-    clearLoopButton.setEnabled (player.hasLoop());
+    clearLoopButton.setEnabled (loopExists());
     zoomLoopButton.setEnabled (player.hasLoop());
+
+    if (youTubeTimeline != nullptr)
+        youTubeTimeline->repaint();
 
     if (pendingLoopStart < 0.0)
         setAButton.setButtonText ("Set A");
@@ -501,6 +713,9 @@ void PracticePanel::timerCallback()
 {
     if (auto song = player.getSong(); song != shownSong)
     {
+        if (youTubeMode)
+            closeYouTube();   // a song was loaded from elsewhere (e.g. the command line)
+
         shownSong = song;
         songLabel.setText (song != nullptr ? song->name : juce::String ("No song loaded"), juce::dontSendNotification);
         pendingLoopStart = -1.0;
@@ -509,21 +724,72 @@ void PracticePanel::timerCallback()
         startChordAnalysis (song);
     }
 
-    const auto hasSong = player.hasSong();
+    if (youTubeMode)
+    {
+        const auto& st = youtube->getState();
 
-    for (auto* b : { &rewindButton, &playButton, &stopButton, &setAButton, &setBButton, &zoomOutButton, &zoomInButton, &fitButton })
-        b->setEnabled (hasSong);
+        for (auto* b : { &rewindButton, &playButton, &stopButton, &setAButton, &setBButton })
+            b->setEnabled (st.ready && st.errorCode == 0);
 
-    playButton.setButtonText (player.isPlaying() ? "Pause" : "Play");
-    timeLabel.setText (formatTime (player.getPositionSeconds()) + " / " + formatTime (player.getLengthSeconds()),
-                       juce::dontSendNotification);
+        playButton.setButtonText (st.playing ? "Pause" : "Play");
+        timeLabel.setText (formatTime (st.time) + " / " + formatTime (st.duration), juce::dontSendNotification);
 
-    if (hasSong)
-        waveform.refresh();
+        const auto error = youtube->getErrorText();
+        auto text = "YouTube: " + youtube->getTitle();
 
-    const auto transpose = juce::roundToInt (pitchSlider.getValue());
-    chordView.update (player.getPositionSeconds(), transpose);
-    waveform.setChordTranspose (transpose);
+        if (error.isNotEmpty())
+            text = error;
+        else if (! st.ready)
+            text += "  (loading...)";
+       #if JUCE_IOS
+        else if (! st.playing && st.time < 0.5)
+            text += "  (first time: tap the video itself to start)";
+       #endif
+
+        songLabel.setText (text, juce::dontSendNotification);
+        songLabel.setColour (juce::Label::textColourId, error.isNotEmpty() ? theme::highlight : juce::Colours::white.withAlpha (0.7f));
+
+        if (openOnYouTubeButton.isVisible() != (error.isNotEmpty()))
+        {
+            openOnYouTubeButton.setVisible (error.isNotEmpty());
+            resized();
+        }
+
+        // Follow YouTube only when it changes speed itself (its own settings menu, or snapping our value);
+        // during ads it reports 1x while our choice is still pending.
+        if (st.rate > 0.0 && std::abs (st.rate - lastShownRate) > 0.001 && ! speedSlider.isMouseButtonDown()
+            && std::abs (st.rate - youtube->getRequestedRate()) < 0.001)
+        {
+            lastShownRate = st.rate;
+            speedSlider.setValue (st.rate * 100.0, juce::dontSendNotification);
+        }
+
+        youTubeTimeline->repaint();
+
+        if (youtube->isCompact() != compactShown)
+        {
+            compactShown = youtube->isCompact();
+            repaint (videoArea);
+        }
+    }
+    else
+    {
+        const auto hasSong = player.hasSong();
+
+        for (auto* b : { &rewindButton, &playButton, &stopButton, &setAButton, &setBButton, &zoomOutButton, &zoomInButton, &fitButton })
+            b->setEnabled (hasSong);
+
+        playButton.setButtonText (player.isPlaying() ? "Pause" : "Play");
+        timeLabel.setText (formatTime (player.getPositionSeconds()) + " / " + formatTime (player.getLengthSeconds()),
+                           juce::dontSendNotification);
+
+        if (hasSong)
+            waveform.refresh();
+
+        const auto transpose = juce::roundToInt (pitchSlider.getValue());
+        chordView.update (player.getPositionSeconds(), transpose);
+        waveform.setChordTranspose (transpose);
+    }
 
     metronomeButton.setButtonText (metronome.isRunning() ? "Stop metronome" : "Start metronome");
 
@@ -558,6 +824,20 @@ void PracticePanel::updateSubdivisionControls()
 void PracticePanel::paint (juce::Graphics& g)
 {
     g.fillAll (theme::background);
+
+    if (youTubeMode)
+    {
+        g.setColour (juce::Colours::black);
+        g.fillRect (videoArea);
+
+        if (youtube != nullptr && youtube->isCompact())
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.5f));
+            g.setFont (juce::FontOptions (16.0f));
+            g.drawText ("The video is in the compact player (press Expand on it to bring it back here).",
+                        videoArea, juce::Justification::centred);
+        }
+    }
 }
 
 void PracticePanel::resized()
@@ -570,14 +850,31 @@ void PracticePanel::resized()
     openButton.setBounds (top.removeFromLeft (170).reduced (3));
     timeLabel.setBounds (top.removeFromRight (190));
     top.removeFromRight (12);
-    zoomLoopButton.setBounds (top.removeFromRight (130).reduced (3));
-    fitButton.setBounds (top.removeFromRight (60).reduced (3));
-    zoomInButton.setBounds (top.removeFromRight (48).reduced (3));
-    zoomOutButton.setBounds (top.removeFromRight (48).reduced (3));
+
+    if (youTubeMode)
+    {
+        closeVideoButton.setBounds (top.removeFromRight (120).reduced (3));
+        compactButton.setBounds (top.removeFromRight (150).reduced (3));
+
+        if (openOnYouTubeButton.isVisible())
+            openOnYouTubeButton.setBounds (top.removeFromRight (150).reduced (3));
+    }
+    else
+    {
+        zoomLoopButton.setBounds (top.removeFromRight (130).reduced (3));
+        fitButton.setBounds (top.removeFromRight (60).reduced (3));
+        zoomInButton.setBounds (top.removeFromRight (48).reduced (3));
+        zoomOutButton.setBounds (top.removeFromRight (48).reduced (3));
+    }
+
     songLabel.setBounds (top.reduced (8, 0));
 
-    // Waveform (includes the overview strip at its bottom)
-    waveform.setBounds (area.removeFromTop (juce::jmax (170, area.getHeight() * 38 / 100)).reduced (0, 4));
+    // Waveform (includes the overview strip at its bottom), or the YouTube video + its timeline.
+    // The video stays at least 216 px high: YouTube's embedded player must be at least 200 x 200.
+    auto songArea = area.removeFromTop (juce::jmax (youTubeMode ? 256 : 170, area.getHeight() * 38 / 100)).reduced (0, 4);
+    waveform.setBounds (songArea);
+    youTubeTimeline->setBounds (songArea.removeFromBottom (30));
+    videoArea = songArea.withTrimmedBottom (4);
 
     // Transport
     auto transport = area.removeFromTop (52).reduced (0, 4);

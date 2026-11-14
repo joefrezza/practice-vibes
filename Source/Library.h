@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_core/juce_core.h>
+#include <optional>
 #include <vector>
 
 namespace pv
@@ -30,6 +31,16 @@ struct Resource
 ResourceKind classifyFileName (const juce::String& fileName);
 ResourceKind classifyUrl (const juce::String& url);
 ResourceKind kindOf (const Resource&);
+
+/** A YouTube video reference taken from any usual link form. */
+struct YouTubeLink
+{
+    juce::String videoId;
+    double startSeconds = 0.0;
+};
+
+/** watch?v=, youtu.be/, shorts/, embed/, live/, m. and music. hosts; start from t= / start= / #t= ("90", "1m30s"). */
+std::optional<YouTubeLink> parseYouTubeUrl (const juce::String& url);
 
 /** Splits "jazz, #technique , Jazz" into { "jazz", "technique" }: trimmed, no '#', no empties, no duplicates (ignoring case). */
 juce::StringArray parseTags (const juce::String& text);

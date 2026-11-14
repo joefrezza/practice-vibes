@@ -9,6 +9,8 @@
 namespace pv
 {
 
+class YouTubePlayer;
+
 /** The "Practice" tab: song player (speed, pitch, A-B loop) and metronome. */
 class PracticePanel final : public juce::Component,
                             private juce::Timer
@@ -24,8 +26,33 @@ public:
     /** Loads a song into the player (also used by the Topics tab to open audio resources). */
     void loadSong (const juce::URL&);
 
+    /** YouTube mode: the video (drawn by MainComponent's YouTubePlayer over getVideoArea()) replaces the waveform;
+        transport, A-B loop, speed and volume control the video. */
+    void setYouTubePlayer (YouTubePlayer* p)            { youtube = p; }
+    void showYouTube();
+    void closeYouTube();
+    bool isYouTubeMode() const noexcept                 { return youTubeMode; }
+    juce::Rectangle<int> getVideoArea() const noexcept  { return videoArea; }
+    std::function<void()> onCompactRequested;
+
 private:
     class BeatIndicator;
+    class YouTubeTimeline;
+
+    // YouTube mode
+    YouTubePlayer* youtube = nullptr;
+    bool youTubeMode = false, compactShown = false;
+    double lastShownRate = 1.0;
+    juce::Rectangle<int> videoArea;
+    std::unique_ptr<YouTubeTimeline> youTubeTimeline;
+    juce::TextButton compactButton { "Compact player" }, closeVideoButton { "Close video" }, openOnYouTubeButton { "Open on YouTube" };
+    void updateModeVisibility();
+    double positionSeconds() const;
+    bool loopIsEnabled() const;
+    bool loopExists() const;
+    double loopStartSeconds() const;
+    double loopEndSeconds() const;
+    void setLoop (double start, double end, bool enabled);
 
     void timerCallback() override;
     void openFile();

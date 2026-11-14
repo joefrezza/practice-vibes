@@ -43,6 +43,75 @@ ResourceKind classifyUrl (const juce::String& url)
     return ResourceKind::web;
 }
 
+static double parseYouTubeTime (juce::String t)
+{
+    t = t.trim().toLowerCase();
+
+    if (t.containsOnly ("0123456789."))
+        return t.getDoubleValue();
+
+    double total = 0.0, number = 0.0;
+    bool any = false;
+
+    for (auto c : t)
+    {
+        if (c >= '0' && c <= '9')
+        {
+            number = number * 10.0 + (c - '0');
+            any = true;
+        }
+        else if (c == 'h') { total += number * 3600.0; number = 0.0; }
+        else if (c == 'm') { total += number * 60.0;   number = 0.0; }
+        else if (c == 's') { total += number;          number = 0.0; }
+        else return 0.0;
+    }
+
+    return any ? total + number : 0.0;
+}
+
+std::optional<YouTubeLink> parseYouTubeUrl (const juce::String& urlText)
+{
+    auto text = urlText.trim();
+
+    if (! text.containsChar (':'))
+        text = "https://" + text;
+
+    if (classifyUrl (text) != ResourceKind::youtube)
+        return std::nullopt;
+
+    const auto afterScheme = text.fromFirstOccurrenceOf ("://", false, false);
+    const auto host = afterScheme.upToFirstOccurrenceOf ("/", false, false).upToFirstOccurrenceOf ("?", false, false).toLowerCase();
+    const auto fragment = text.fromFirstOccurrenceOf ("#", false, false);
+    const auto withoutFragment = text.upToFirstOccurrenceOf ("#", false, false);
+    const auto path = afterScheme.fromFirstOccurrenceOf ("/", false, false).upToFirstOccurrenceOf ("?", false, false)
+                                 .upToFirstOccurrenceOf ("#", false, false);
+    const auto query = withoutFragment.fromFirstOccurrenceOf ("?", false, false);
+
+    juce::StringPairArray params;
+
+    for (auto& pair : juce::StringArray::fromTokens (query + "&" + fragment, "&", {}))
+        if (pair.containsChar ('='))
+            params.set (pair.upToFirstOccurrenceOf ("=", false, false), juce::URL::removeEscapeChars (pair.fromFirstOccurrenceOf ("=", false, false)));
+
+    juce::String id;
+    const auto segments = juce::StringArray::fromTokens (path, "/", {});
+
+    if (host.endsWith ("youtu.be"))
+        id = segments[0];
+    else if (segments[0] == "watch")
+        id = params["v"];
+    else if (juce::StringArray { "shorts", "embed", "live", "v", "e" }.contains (segments[0]))
+        id = segments[1];
+
+    if (id.length() < 6 || id.length() > 20 || ! id.containsOnly ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"))
+        return std::nullopt;
+
+    YouTubeLink link;
+    link.videoId = id;
+    link.startSeconds = parseYouTubeTime (params.containsKey ("t") ? params["t"] : params["start"]);
+    return link;
+}
+
 ResourceKind kindOf (const Resource& r)
 {
     return r.isLink() ? classifyUrl (r.url) : classifyFileName (r.fileName);

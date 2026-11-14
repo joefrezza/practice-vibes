@@ -1,6 +1,7 @@
 #include "LibraryPanel.h"
 #include "AppPaths.h"
 #include "Theme.h"
+#include "WebView.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
@@ -118,25 +119,6 @@ namespace
     juce::String formatDate (juce::Time t)
     {
         return t == juce::Time() ? juce::String() : t.formatted ("%d %b %Y");
-    }
-
-    juce::WebBrowserComponent::Options viewerOptions()
-    {
-        auto options = juce::WebBrowserComponent::Options{};
-
-       #if JUCE_WINDOWS
-        options = options.withBackend (juce::WebBrowserComponent::Options::Backend::webview2)
-                         .withWinWebView2Options (juce::WebBrowserComponent::Options::WinWebView2{}
-                                                      .withUserDataFolder (getAppDataFolder().getChildFile ("WebView2")));
-       #endif
-
-        return options;
-    }
-
-    bool webViewAvailable()
-    {
-        static const bool available = juce::WebBrowserComponent::areOptionsSupported (viewerOptions());
-        return available;
     }
 
     /** Files the in-app viewer can show on this platform (others open in their own app on desktop). */
@@ -630,7 +612,7 @@ class LibraryPanel::Viewer final : public juce::Component
 {
 public:
     Viewer (const juce::String& urlToShow, std::function<void()> openOutsideFn)
-        : browser (viewerOptions()), openOutside (std::move (openOutsideFn))
+        : browser (webViewOptions()), openOutside (std::move (openOutsideFn))
     {
         getProperties().set ("fillOverlay", true);
         addAndMakeVisible (browser);
@@ -1338,6 +1320,15 @@ void LibraryPanel::openResource (const Topic& topic, const Resource& r)
     }
 
     const auto url = r.url;
+
+    if (kindOf (r) == ResourceKind::youtube && webViewAvailable() && onOpenYouTube != nullptr)
+    {
+        if (const auto link = parseYouTubeUrl (url))
+        {
+            onOpenYouTube (*link, r.title);
+            return;
+        }
+    }
 
     if (webViewAvailable() && showOverlay != nullptr)
         showOverlay (r.title, std::make_unique<Viewer> (url, [url] { juce::URL (url).launchInDefaultBrowser(); }));

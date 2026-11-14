@@ -4,6 +4,7 @@
 #include "PracticePanel.h"
 #include "RigPanel.h"
 #include "TunerPanel.h"
+#include "YouTubePlayer.h"
 #include "Theme.h"
 
 namespace pv
@@ -220,6 +221,15 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
         practicePanel->loadSong (juce::URL (file));
         tabs.setCurrentTabIndex (0);
     };
+    libraryPanel->onOpenYouTube = [this] (const YouTubeLink& link, const juce::String& title)
+    {
+        youtube->load (link, title);
+        youtube->setCompact (false);
+        youTubeAutoCompact = false;
+        practicePanel->showYouTube();
+        tabs.setCurrentTabIndex (0);
+        layoutYouTube();
+    };
 
     tabs.setTabBarDepth (42);
     tabs.setOutline (0);
@@ -230,13 +240,41 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
     tabs.addTab ("Log", theme::background, logPanel.get(), false);
     addAndMakeVisible (tabs);
 
+    youtube = std::make_unique<YouTubePlayer>();
+    addChildComponent (*youtube);
+    practicePanel->setYouTubePlayer (youtube.get());
+    practicePanel->onCompactRequested = [this]
+    {
+        youTubeAutoCompact = false;
+        youtube->setCompact (true);
+        youtube->setBounds (lastCompactBounds.isEmpty() ? defaultCompactBounds() : lastCompactBounds);
+        layoutYouTube();
+    };
+    youtube->onExpand = [this]
+    {
+        lastCompactBounds = youtube->getBounds();
+        youtube->setCompact (false);
+        youTubeAutoCompact = false;
+        closeOverlay();
+        tabs.setCurrentTabIndex (0);
+        layoutYouTube();
+    };
+    youtube->onClose = [this]
+    {
+        practicePanel->closeYouTube();
+        layoutYouTube();
+    };
+
     overlay = std::make_unique<Overlay>();
     overlay->onClose = [this] { closeOverlay(); };
     addChildComponent (*overlay);
+
+    startTimerHz (10);
 }
 
 MainComponent::~MainComponent()
 {
+    stopTimer();
     engine.onToggleTuner = nullptr;
     engine.onSaveState = nullptr;
     closeOverlay();
@@ -268,6 +306,89 @@ void MainComponent::resized()
     titleLabel.setBounds (top);
 
     tabs.setBounds (area);
+    layoutYouTube();
+}
+
+//==============================================================================
+void MainComponent::timerCallback()
+{
+    layoutYouTube();
+}
+
+juce::Rectangle<int> MainComponent::defaultCompactBounds() const
+{
+    const auto w = YouTubePlayer::compactVideoWidth + 2;
+    const auto h = YouTubePlayer::compactVideoHeight + YouTubePlayer::compactBarHeight + 1;
+    return { getWidth() - w - 16, getHeight() - h - 16, w, h };
+}
+
+void MainComponent::layoutYouTube()
+{
+    if (youtube == nullptr || overlay == nullptr || practicePanel == nullptr)
+        return;
+
+    if (! youtube->hasVideo() || ! practicePanel->isYouTubeMode())
+    {
+        youtube->setVisible (false);
+        return;
+    }
+
+    const auto practiceShowing = tabs.getCurrentTabIndex() == 0 && ! overlay->isVisible();
+    auto compact = youtube->isCompact();
+
+    // Leaving the Practice tab while the video plays: keep it going in the floating player.
+    if (! compact && ! practiceShowing && youtube->getState().playing)
+    {
+        compact = true;
+        youTubeAutoCompact = true;
+    }
+
+    // ...and dock it again when coming back, unless you asked for the compact player yourself.
+    if (compact && youTubeAutoCompact && practiceShowing)
+    {
+        compact = false;
+        youTubeAutoCompact = false;
+    }
+
+    if (compact != youtube->isCompact())
+    {
+        if (! compact)
+            lastCompactBounds = youtube->getBounds();
+
+        youtube->setCompact (compact);
+
+        if (compact)
+            youtube->setBounds (lastCompactBounds.isEmpty() ? defaultCompactBounds() : lastCompactBounds);
+    }
+
+    if (compact)
+    {
+        // Keep it inside the window (after a resize, for instance).
+        auto b = youtube->getBounds();
+        b = b.constrainedWithin (getLocalBounds());
+
+        if (b != youtube->getBounds())
+            youtube->setBounds (b);
+
+        if (! youtube->isVisible())
+        {
+            youtube->setVisible (true);
+            youtube->toFront (false);
+        }
+    }
+    else if (practiceShowing)
+    {
+        const auto area = getLocalArea (practicePanel.get(), practicePanel->getVideoArea());
+
+        if (youtube->getBounds() != area)
+            youtube->setBounds (area);
+
+        youtube->setVisible (! area.isEmpty());
+    }
+    else
+    {
+        youtube->setVisible (false);   // paused on another tab or under an overlay
+    }
 }
 
 //==============================================================================

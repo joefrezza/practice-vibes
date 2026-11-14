@@ -1973,6 +1973,27 @@ static void testLibrary()
     }
 
     root.deleteRecursively();
+
+    // YouTube links
+    auto yt = [] (const char* url, const char* id, double start)
+    {
+        const auto link = parseYouTubeUrl (url);
+        return link.has_value() && link->videoId == id && std::abs (link->startSeconds - start) < 0.001;
+    };
+    check (yt ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ", 0.0)
+               && yt ("youtube.com/watch?feature=share&v=dQw4w9WgXcQ&t=90", "dQw4w9WgXcQ", 90.0)
+               && yt ("https://youtu.be/dQw4w9WgXcQ?t=1m30s", "dQw4w9WgXcQ", 90.0)
+               && yt ("https://m.youtube.com/watch?v=dQw4w9WgXcQ#t=1h2m3s", "dQw4w9WgXcQ", 3723.0)
+               && yt ("https://www.youtube.com/shorts/abcDEF12345", "abcDEF12345", 0.0)
+               && yt ("https://www.youtube-nocookie.com/embed/abcDEF12345?start=42", "abcDEF12345", 42.0)
+               && yt ("https://music.youtube.com/watch?v=abc_DEF-123&list=RD", "abc_DEF-123", 0.0)
+               && yt ("https://www.youtube.com/live/abcDEF12345", "abcDEF12345", 0.0),
+           "YouTube links: watch / youtu.be / shorts / embed / live / music, start times");
+    check (! parseYouTubeUrl ("https://www.youtube.com/playlist?list=PL123").has_value()
+               && ! parseYouTubeUrl ("https://www.youtube.com/@somechannel").has_value()
+               && ! parseYouTubeUrl ("https://vimeo.com/12345").has_value()
+               && ! parseYouTubeUrl ("https://www.youtube.com/watch?v=bad'id\"x").has_value(),
+           "no video id (playlist, channel, other site, bad characters) -> not a YouTube video");
 }
 
 int main()
