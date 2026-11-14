@@ -52,6 +52,7 @@ public:
     std::unique_ptr<Footswitch> footswitch;
     std::function<void (const juce::MidiMessage&, const juce::String& sourceName)> onMidiMessage;   // UI (message display)
     std::function<int()> getBypassTarget;
+    std::function<void()> onSaveState;          // UI: write pending edits (e.g. topic notes) to disk
     std::function<void()> onToggleTuner;        // UI: open / close the tuner (footswitch action)
 
     // Listens to the guitar input stage while the tuner is open.

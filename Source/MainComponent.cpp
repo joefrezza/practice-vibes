@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "LibraryPanel.h"
 #include "LooperPanel.h"
 #include "PracticePanel.h"
 #include "RigPanel.h"
@@ -119,7 +120,8 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.fillAll (juce::Colours::black.withAlpha (0.88f));
+        const auto opaque = content != nullptr && (bool) content->getProperties()["fillOverlay"];
+        g.fillAll (juce::Colours::black.withAlpha (opaque ? 1.0f : 0.88f));
     }
 
     void resized() override
@@ -147,6 +149,10 @@ private:
                 editor->setBounds (contentArea);
             else
                 editor->setCentrePosition (contentArea.getCentre());
+        }
+        else if (content->getProperties()["fillOverlay"])
+        {
+            content->setBounds (contentArea);   // document / web viewer
         }
         else
         {
@@ -184,6 +190,7 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
     tunerButton.onClick = [this] { toggleTuner(); };
     tunerButton.setTooltip ("Chromatic tuner (a footswitch can open and close it too)");
     engine.onToggleTuner = [this] { toggleTuner(); };
+    engine.onSaveState = [this] { if (libraryPanel != nullptr) libraryPanel->flush(); };
 
     bluetoothButton.onClick = []
     {
@@ -197,6 +204,7 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
     saveButton.onClick = [this] { engine.saveState(); };
 
     practicePanel = std::make_unique<PracticePanel> (*engine.player, *engine.metronome);
+    libraryPanel = std::make_unique<LibraryPanel>();
     looperPanel = std::make_unique<LooperPanel> (engine);
     rigPanel = std::make_unique<RigPanel> (engine);
     logPanel = std::make_unique<LogPanel> (appLog);
@@ -205,10 +213,18 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
     rigPanel->hideOverlay = [this] { closeOverlay(); };
     looperPanel->showOverlay = [this] (const juce::String& title, std::unique_ptr<juce::Component> c) { showOverlay (title, std::move (c)); };
     looperPanel->hideOverlay = [this] { closeOverlay(); };
+    libraryPanel->showOverlay = [this] (const juce::String& title, std::unique_ptr<juce::Component> c) { showOverlay (title, std::move (c)); };
+    libraryPanel->hideOverlay = [this] { closeOverlay(); };
+    libraryPanel->onOpenAudio = [this] (const juce::File& file)
+    {
+        practicePanel->loadSong (juce::URL (file));
+        tabs.setCurrentTabIndex (0);
+    };
 
     tabs.setTabBarDepth (42);
     tabs.setOutline (0);
     tabs.addTab ("Practice", theme::background, practicePanel.get(), false);
+    tabs.addTab ("Topics", theme::background, libraryPanel.get(), false);
     tabs.addTab ("Looper", theme::background, looperPanel.get(), false);
     tabs.addTab ("Guitar rig", theme::background, rigPanel.get(), false);
     tabs.addTab ("Log", theme::background, logPanel.get(), false);
@@ -222,6 +238,7 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
 MainComponent::~MainComponent()
 {
     engine.onToggleTuner = nullptr;
+    engine.onSaveState = nullptr;
     closeOverlay();
     tabs.clearTabs();
 }

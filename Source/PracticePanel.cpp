@@ -403,27 +403,30 @@ void PracticePanel::openFile()
     {
         const auto url = chooser.getURLResult();
 
-        if (url.isEmpty())
+        if (! url.isEmpty())
+            loadSong (url);
+    });
+}
+
+void PracticePanel::loadSong (const juce::URL& url)
+{
+    songLabel.setText ("Loading " + juce::URL::removeEscapeChars (url.getFileName()) + "...", juce::dontSendNotification);
+    openButton.setEnabled (false);
+
+    player.loadAsync (url, [safeThis = SafePointer<PracticePanel> (this)] (const juce::String& error)
+    {
+        if (safeThis == nullptr)
             return;
 
-        songLabel.setText ("Loading " + juce::URL::removeEscapeChars (url.getFileName()) + "...", juce::dontSendNotification);
-        openButton.setEnabled (false);
+        safeThis->openButton.setEnabled (true);
 
-        player.loadAsync (url, [safeThis = SafePointer<PracticePanel> (this)] (const juce::String& error)
+        if (error.isNotEmpty())
         {
-            if (safeThis == nullptr)
-                return;
+            safeThis->songLabel.setText ("Could not load: " + error, juce::dontSendNotification);
+            return;
+        }
 
-            safeThis->openButton.setEnabled (true);
-
-            if (error.isNotEmpty())
-            {
-                safeThis->songLabel.setText ("Could not load: " + error, juce::dontSendNotification);
-                return;
-            }
-
-            // The timer notices the new song and updates the waveform and labels.
-        });
+        // The timer notices the new song and updates the waveform and labels.
     });
 }
 

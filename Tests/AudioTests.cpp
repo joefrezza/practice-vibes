@@ -5,6 +5,7 @@
 #include "../Source/ChordAnalyzer.h"
 #include "../Source/Footswitch.h"
 #include "../Source/LatencyCalibrator.h"
+#include "../Source/Library.h"
 #include "../Source/LoopFiles.h"
 #include "../Source/Looper.h"
 #include "../Source/MetronomeProcessor.h"
@@ -1790,6 +1791,190 @@ namespace
     }
 }
 
+//==============================================================================
+static void testLibrary()
+{
+    std::cout << "Library (topics / resources)" << std::endl;
+
+    juce::TemporaryFile tempRoot;
+    const auto root = tempRoot.getFile();
+    root.createDirectory();
+
+    // Classification and badges
+    check (classifyFileName ("Lesson 3.PDF") == ResourceKind::pdf, "PDF recognised (upper-case extension)");
+    check (classifyFileName ("riff.mp3") == ResourceKind::audio && classifyFileName ("scan.heic") == ResourceKind::image
+               && classifyFileName ("notes.docx") == ResourceKind::document && classifyFileName ("README") == ResourceKind::other,
+           "audio / image / Word / no extension");
+    check (classifyUrl ("https://www.youtube.com/watch?v=abc") == ResourceKind::youtube
+               && classifyUrl ("https://youtu.be/abc") == ResourceKind::youtube
+               && classifyUrl ("https://docs.google.com/document/d/x") == ResourceKind::googleDoc
+               && classifyUrl ("https://open.spotify.com/track/x") == ResourceKind::web,
+           "YouTube / Google Docs / other links");
+    {
+        Resource pdf;  pdf.fileName = "a.pdf";
+        Resource jpeg; jpeg.fileName = "b.jpeg";
+        Resource yt;   yt.url = "https://youtu.be/x";
+        check (badgeText (pdf) == "PDF" && badgeText (jpeg) == "JPG" && badgeText (yt) == "YT", "badge texts");
+    }
+
+    // Tags
+    check (parseTags ("jazz, #Technique ,, Jazz;  ear training ") == juce::StringArray ({ "jazz", "Technique", "ear training" }),
+           "tags: trimmed, '#' dropped, duplicates ignoring case removed");
+
+    {
+        Library lib (root);
+        check (lib.getTopics().empty() && lib.getInbox().isEmpty(), "empty library");
+
+        auto* t = lib.createTopic ("Autumn Leaves: solo / chords?");
+        check (t != nullptr && t->folder.isDirectory() && t->folder.getChildFile ("topic.xml").existsAsFile(),
+               "topic created with its folder and topic.xml");
+        check (t != nullptr && ! t->folder.getFileName().containsAnyOf (":/?"), "folder name is a legal file name");
+
+        auto* t2 = lib.createTopic ("Autumn Leaves: solo / chords?");
+        check (t2 != nullptr && t2->folder != lib.findTopic (lib.getTopics().back().id)->folder, "same title -> separate folder");
+
+        t = lib.findTopic (lib.getTopics().back().id);   // oldest = first one created
+        t->description = "Line 1\nLine 2 <with> & \"quotes\"";
+        t->tags = parseTags ("jazz, standards");
+        check (lib.saveTopic (*t), "save topic");
+
+        // Files and links
+        auto source = root.getSiblingFile ("pv-test-source.pdf");
+        source.replaceWithText ("%PDF-1.4 test");
+        auto* r = lib.addFile (*t, juce::URL (source));
+        check (r != nullptr && r->id == "pv-test-source.pdf" && t->getFile (*r).existsAsFile() && source.existsAsFile(),
+               "addFile copies into the topic folder (source kept)");
+        auto* r2 = lib.addFile (*t, juce::URL (source));
+        check (r2 != nullptr && r2->fileName == "pv-test-source (2).pdf", "same file name twice -> numbered copy");
+        source.deleteFile();
+
+        auto* link = lib.addLink (*t, "", "www.youtube.com/watch?v=abc");
+        check (link != nullptr && link->url == "https://www.youtube.com/watch?v=abc" && link->title == "YouTube video",
+               "addLink adds https:// and a default title");
+        link->tags = parseTags ("backing track");
+        link->description = "Play along 10x";
+        lib.saveTopic (*t);
+
+        check (lib.moveResource (*t, link->id, -5) && t->resources.front().isLink(), "move resource to the top");
+    }
+
+    {
+        Library lib (root);
+        check (lib.getTopics().size() == 2, "rescan finds both topics");
+        auto& topics = lib.getTopics();
+        const Topic* t = nullptr;
+
+        for (auto& topic : topics)
+            if (topic.resources.size() == 3)
+                t = &topic;
+
+        check (t != nullptr, "topic with 3 resources reloaded");
+
+        if (t != nullptr)
+        {
+            check (t->title == "Autumn Leaves: solo / chords?" && t->description == "Line 1\nLine 2 <with> & \"quotes\"",
+                   "title and multi-line description survive save/load");
+            check (t->tags == juce::StringArray ({ "jazz", "standards" }), "topic tags survive save/load");
+            check (t->resources[0].isLink() && t->resources[0].description == "Play along 10x"
+                       && t->resources[0].tags == juce::StringArray ({ "backing track" }),
+                   "resource order, description and tags survive save/load");
+            check (t->matches ("STANDARDS") && t->matches ("play along") && ! t->matches ("bebop"), "search: tags + resource text");
+            check (t->matchesTag ("Backing Track") && t->matchesTag ("jazz") && ! t->matchesTag ("rock"),
+                   "tag filter: topic or resource tags, ignoring case");
+        }
+
+        check (lib.getAllTags() == juce::StringArray ({ "backing track", "jazz", "standards" }), "all tags, sorted");
+
+        // Another device drops a file into the topic folder and one into the library root,
+        // and a cloud sync conflict leaves a second topic.xml.
+        if (t != nullptr)
+        {
+            const auto folder = t->folder;
+            const auto id = t->id;
+            folder.getChildFile ("tab.gp5").replaceWithText ("x");
+            folder.getChildFile ("topic (1).xml").replaceWithText ("<TOPIC/>");
+            folder.getChildFile ("desktop.ini").replaceWithText ("x");
+            root.getChildFile ("Scales.pdf").replaceWithText ("x");
+            root.getChildFile ("_reserved").createDirectory();
+
+            const auto before = lib.computeSignature();
+            lib.rescan();
+            check (before != juce::String() && lib.computeSignature() == before, "signature stable without changes");
+
+            auto* reloaded = lib.findTopic (id);
+            check (reloaded != nullptr && reloaded->findResource ("tab.gp5") != nullptr
+                       && reloaded->findResource ("tab.gp5")->title == "tab",
+                   "unlisted file in a topic folder shows up as a resource");
+            check (reloaded != nullptr && reloaded->conflictFiles == juce::StringArray ({ "topic (1).xml" })
+                       && reloaded->findResource ("topic (1).xml") == nullptr && reloaded->findResource ("desktop.ini") == nullptr,
+                   "conflict copy flagged, system files ignored");
+            check (lib.getInbox().size() == 1 && lib.getInbox()[0].getFileName() == "Scales.pdf", "loose file lands in the Inbox");
+            check (lib.getTopics().size() == 2, "'_' folders are not topics");
+
+            if (reloaded != nullptr)
+            {
+                auto* moved = lib.moveInboxFile (*reloaded, root.getChildFile ("Scales.pdf"));
+                check (moved != nullptr && lib.getInbox().isEmpty() && reloaded->getFile (*moved).existsAsFile()
+                           && ! root.getChildFile ("Scales.pdf").exists(),
+                       "Inbox file moved into a topic");
+
+                // Referenced file missing (e.g. still syncing): kept, flagged.
+                reloaded->getFile (*reloaded->findResource ("tab.gp5")).deleteFile();
+                lib.saveTopic (*reloaded);
+            }
+
+            const auto changed = lib.computeSignature();
+            check (changed != before, "signature changes when files change");
+        }
+
+        // A folder made by hand (no topic.xml) is a topic named after the folder.
+        root.getChildFile ("Sweep picking").createDirectory();
+        lib.rescan();
+        auto* manual = lib.findTopic ("dir:Sweep picking");
+        check (manual != nullptr && manual->title == "Sweep picking", "hand-made folder becomes a topic");
+    }
+
+    {
+        Library lib (root);
+        Topic* t = nullptr;
+
+        for (auto& topic : lib.getTopics())
+            if (topic.resources.size() >= 4)
+                t = lib.findTopic (topic.id);
+
+        check (t != nullptr, "topic reloaded after Inbox move");
+
+        if (t != nullptr)
+        {
+            auto* missing = t->findResource ("tab.gp5");
+            check (missing != nullptr && t->isMissing (*missing), "listed but missing file is kept and flagged");
+
+            auto* pdf = t->findResource ("pv-test-source.pdf");
+            const auto pdfFile = pdf != nullptr ? t->getFile (*pdf) : juce::File();
+            check (pdf != nullptr && lib.removeResource (*t, "pv-test-source.pdf") && ! pdfFile.existsAsFile()
+                       && t->findResource ("pv-test-source.pdf") == nullptr,
+                   "remove resource deletes its file");
+
+            const auto folder = t->folder;
+            check (lib.deleteTopic (t->id) && ! folder.exists() && lib.getTopics().size() == 2, "delete topic removes its folder");
+        }
+    }
+
+    // A topic.xml must not reach outside its folder.
+    {
+        auto folder = root.getChildFile ("Evil");
+        folder.createDirectory();
+        folder.getChildFile ("topic.xml").replaceWithText (
+            "<TOPIC id=\"x\" title=\"Evil\"><RESOURCE file=\"../secret.txt\" title=\"s\"/><RESOURCE file=\"ok.txt\" title=\"ok\"/></TOPIC>");
+        Library lib (root);
+        auto* t = lib.findTopic ("x");
+        check (t != nullptr && t->findResource ("../secret.txt") == nullptr && t->findResource ("ok.txt") != nullptr,
+               "file paths with folders in topic.xml are rejected");
+    }
+
+    root.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1810,6 +1995,7 @@ int main()
     testLoopFiles();
     testTuner();
     testTunings();
+    testLibrary();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

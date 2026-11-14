@@ -17,6 +17,22 @@ FetchContent_Declare(signalsmith-stretch    # time-stretch / pitch-shift (MIT)
 
 FetchContent_MakeAvailable(JUCE signalsmith-stretch)
 
+# Windows: the in-app viewer (documents, YouTube) uses Microsoft's WebView2 (runtime ships with Windows 11).
+# The SDK package (headers + static loader) is downloaded from NuGet into the build folder, where JUCE's
+# FindWebView2 looks for a "*Microsoft.Web.WebView2*" directory.
+if(WIN32)
+    set(PV_WEBVIEW2_VERSION 1.0.3485.44)
+    FetchContent_Declare(webview2
+        URL           https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/${PV_WEBVIEW2_VERSION}
+        DOWNLOAD_NAME webview2.zip
+        SOURCE_DIR    ${CMAKE_BINARY_DIR}/nuget/Microsoft.Web.WebView2.${PV_WEBVIEW2_VERSION})
+    FetchContent_MakeAvailable(webview2)
+    set(JUCE_WEBVIEW2_PACKAGE_LOCATION ${CMAKE_BINARY_DIR}/nuget)
+    set(PV_WEBVIEW2 TRUE)
+else()
+    set(PV_WEBVIEW2 FALSE)
+endif()
+
 # Treat third-party headers as system headers so our strict warnings don't apply to them.
 set_target_properties(signalsmith-stretch signalsmith-linear PROPERTIES SYSTEM TRUE)
 
@@ -43,7 +59,8 @@ juce_add_gui_app(PracticeVibes
     REQUIRES_FULL_SCREEN           TRUE
     TARGETED_DEVICE_FAMILY         "1,2"
     PLUGINHOST_AU                  ${PV_HOST_AU}
-    NEEDS_WEB_BROWSER              FALSE
+    NEEDS_WEB_BROWSER              TRUE
+    NEEDS_WEBVIEW2                 ${PV_WEBVIEW2}
     NEEDS_CURL                     FALSE)
 
 target_sources(PracticeVibes PRIVATE
@@ -54,6 +71,8 @@ target_sources(PracticeVibes PRIVATE
     Source/ChordView.cpp
     Source/Footswitch.cpp
     Source/FootswitchPanel.cpp
+    Source/Library.cpp
+    Source/LibraryPanel.cpp
     Source/LoopFiles.cpp
     Source/Looper.cpp
     Source/LooperPanel.cpp
@@ -72,7 +91,8 @@ target_sources(PracticeVibes PRIVATE
 target_compile_definitions(PracticeVibes PRIVATE
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:PracticeVibes,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:PracticeVibes,JUCE_VERSION>"
-    JUCE_WEB_BROWSER=0
+    JUCE_WEB_BROWSER=1
+    JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1
     JUCE_USE_CURL=0
     JUCE_STRICT_REFCOUNTEDPOINTER=1
     JUCE_SILENCE_XCODE_15_LINKER_WARNING=1)
@@ -89,6 +109,7 @@ target_link_libraries(PracticeVibes
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
+        juce::juce_gui_extra
         signalsmith-stretch
     PUBLIC
         juce::juce_recommended_config_flags
@@ -103,6 +124,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         Tests/AudioTests.cpp
         Source/ChordAnalyzer.cpp
         Source/Footswitch.cpp
+        Source/Library.cpp
         Source/LoopFiles.cpp
         Source/Looper.cpp
         Source/MetronomeProcessor.cpp

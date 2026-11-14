@@ -21,6 +21,9 @@ public:
     void resized() override;
     bool keyPressed (const juce::KeyPress&) override;
 
+    /** Loads a song into the player (also used by the Topics tab to open audio resources). */
+    void loadSong (const juce::URL&);
+
 private:
     class BeatIndicator;
 

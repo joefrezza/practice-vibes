@@ -7,11 +7,12 @@
 namespace pv
 {
 
+class LibraryPanel;
 class LooperPanel;
 class PracticePanel;
 class RigPanel;
 
-/** Top-level UI: title bar, tabs (Practice / Looper / Guitar rig / Log) and a full-window
+/** Top-level UI: title bar, tabs (Practice / Topics / Looper / Guitar rig / Log) and a full-window
     overlay used for plugin UIs and the audio settings.
 */
 class MainComponent final : public juce::Component
@@ -41,6 +42,7 @@ private:
                      saveButton          { "Save" };
 
     std::unique_ptr<PracticePanel> practicePanel;
+    std::unique_ptr<LibraryPanel> libraryPanel;
     std::unique_ptr<LooperPanel> looperPanel;
     std::unique_ptr<RigPanel> rigPanel;
     std::unique_ptr<LogPanel> logPanel;

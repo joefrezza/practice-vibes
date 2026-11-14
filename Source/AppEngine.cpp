@@ -145,6 +145,9 @@ void AppEngine::saveMetronomeIfChanged()
 
 void AppEngine::saveState()
 {
+    if (onSaveState)
+        onSaveState();
+
     saveMetronomeIfChanged();
 
     if (auto deviceXml = deviceManager.createStateXml())

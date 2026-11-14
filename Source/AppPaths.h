@@ -29,7 +29,8 @@ inline juce::File getChainFile()          { return getAppDataFolder().getChildFi
 inline juce::File getLooperSettingsFile() { return getAppDataFolder().getChildFile ("looper.xml"); }
 inline juce::File getMetronomeFile()      { return getAppDataFolder().getChildFile ("metronome.xml"); }
 inline juce::File getTunerFile()         { return getAppDataFolder().getChildFile ("tuner.xml"); }
-inline juce::File getFootswitchFile()     { return getAppDataFolder().getChildFile ("footswitch.xml"); }
+inline juce::File getLibrarySettingsFile() { return getAppDataFolder().getChildFile ("library.xml"); }
+inline juce::File getFootswitchFile()    { return getAppDataFolder().getChildFile ("footswitch.xml"); }
 inline juce::File getDeviceStateFile()    { return getAppDataFolder().getChildFile ("audio-device.xml"); }
 inline juce::File getPluginCacheFile()    { return getAppDataFolder().getChildFile ("plugin-cache.xml"); }
 inline juce::File getDeadMansPedalFile()  { return getAppDataFolder().getChildFile ("plugin-scan-in-progress.txt"); }
