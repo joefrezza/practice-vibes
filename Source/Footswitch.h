@@ -30,7 +30,7 @@ struct MidiTrigger
 /** Something a footswitch can do. */
 struct FootswitchAction
 {
-    enum class Kind { none, trackPress, trackClear, trackMute, undo, muteAll, clearAll, metronome, bypass };
+    enum class Kind { none, trackPress, trackClear, trackMute, undo, muteAll, clearAll, metronome, bypass, tuner };
     Kind kind = Kind::none;
     int track = 0;
 

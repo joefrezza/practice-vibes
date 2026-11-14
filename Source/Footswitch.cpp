@@ -75,6 +75,7 @@ juce::String FootswitchAction::describe() const
         case Kind::clearAll:   return "Clear all tracks";
         case Kind::metronome:  return "Start / stop metronome";
         case Kind::bypass:     return "Guitar rig: bypass selected plugin";
+        case Kind::tuner:      return "Tuner on / off";
         case Kind::none:       break;
     }
 
@@ -93,6 +94,7 @@ juce::String FootswitchAction::toString() const
         case Kind::clearAll:   return "clearAll";
         case Kind::metronome:  return "metronome";
         case Kind::bypass:     return "bypass";
+        case Kind::tuner:      return "tuner";
         case Kind::none:       break;
     }
 
@@ -112,6 +114,7 @@ FootswitchAction FootswitchAction::fromString (const juce::String& text)
     if (name == "clearAll")  return { Kind::clearAll, 0 };
     if (name == "metronome") return { Kind::metronome, 0 };
     if (name == "bypass")    return { Kind::bypass, 0 };
+    if (name == "tuner")     return { Kind::tuner, 0 };
     return {};
 }
 
@@ -123,7 +126,7 @@ std::vector<FootswitchAction> FootswitchAction::all (int numTracks)
         for (int t = 0; t < numTracks; ++t)
             list.push_back ({ kind, t });
 
-    for (auto kind : { Kind::undo, Kind::muteAll, Kind::clearAll, Kind::metronome, Kind::bypass })
+    for (auto kind : { Kind::undo, Kind::muteAll, Kind::clearAll, Kind::metronome, Kind::bypass, Kind::tuner })
         list.push_back ({ kind, 0 });
 
     return list;

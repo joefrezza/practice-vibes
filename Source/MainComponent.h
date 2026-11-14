@@ -28,13 +28,15 @@ private:
     class Overlay;
 
     void openAudioSettings();
+    void toggleTuner();
     void showOverlay (const juce::String& title, std::unique_ptr<juce::Component>);
     void closeOverlay();
 
     AppEngine& engine;
 
     juce::Label titleLabel;
-    juce::TextButton audioSettingsButton { "Audio settings" },
+    juce::TextButton tunerButton         { "Tuner" },
+                     audioSettingsButton { "Audio settings" },
                      bluetoothButton     { "Bluetooth MIDI" },
                      saveButton          { "Save" };
 

@@ -65,6 +65,8 @@ target_sources(PracticeVibes PRIVATE
     Source/PluginChain.cpp
     Source/PracticePanel.cpp
     Source/RigPanel.cpp
+    Source/Tuner.cpp
+    Source/TunerPanel.cpp
     Source/WaveformView.cpp)
 
 target_compile_definitions(PracticeVibes PRIVATE
@@ -104,7 +106,8 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         Source/LoopFiles.cpp
         Source/Looper.cpp
         Source/MetronomeProcessor.cpp
-        Source/PlayerProcessor.cpp)
+        Source/PlayerProcessor.cpp
+        Source/Tuner.cpp)
 
     target_compile_definitions(PracticeVibesTests PRIVATE
         JUCE_WEB_BROWSER=0

@@ -9,6 +9,8 @@
 #include "../Source/Looper.h"
 #include "../Source/MetronomeProcessor.h"
 #include "../Source/PlayerProcessor.h"
+#include "../Source/Tuner.h"
+#include "../Source/GainMeterProcessor.h"
 
 #include <iostream>
 #include <thread>
@@ -1417,6 +1419,177 @@ namespace
             check (! LatencyCalibrator::analyse ({ 30.0, 31.0, 29.0 }).ok, "too few hits are rejected");
         }
     }
+
+    std::vector<float> makeTone (double sampleRate, double frequency, int length, std::initializer_list<float> harmonics,
+                                 float noise = 0.0f, double decaySeconds = 0.0)
+    {
+        std::vector<float> out ((size_t) length);
+        juce::Random random (42);
+
+        for (int i = 0; i < length; ++i)
+        {
+            const auto t = i / sampleRate;
+            double v = 0.0;
+            int k = 1;
+
+            for (auto a : harmonics)
+            {
+                v += a * std::sin (juce::MathConstants<double>::twoPi * frequency * k * t + 0.3 * k);
+                ++k;
+            }
+
+            if (decaySeconds > 0.0)
+                v *= std::exp (-t / decaySeconds);
+
+            out[(size_t) i] = (float) (0.25 * v) + noise * (random.nextFloat() * 2.0f - 1.0f);
+        }
+
+        return out;
+    }
+
+    float centsBetween (float a, float b) { return 1200.0f * std::log2 (a / b); }
+
+    void testTuner()
+    {
+        std::cout << "Tuner" << std::endl;
+        PitchDetector detector;
+
+        for (auto rate : { 44100.0, 48000.0, 96000.0 })
+        {
+            float worst = 0.0f;
+            bool allValid = true;
+
+            // Low B (7-string), drop D, standard strings, A4, a high fret.
+            for (auto f : { 61.74f, 73.42f, 82.41f, 110.0f, 146.83f, 196.0f, 246.94f, 329.63f, 440.0f, 987.77f })
+            {
+                const auto tone = makeTone (rate, f, PitchDetector::samplesNeeded (rate), { 1.0f });
+                const auto r = detector.analyse (tone.data(), (int) tone.size(), rate);
+                allValid = allValid && r.isValid();
+
+                if (r.isValid())
+                    worst = juce::jmax (worst, std::abs (centsBetween (r.frequency, f)));
+            }
+
+            check (allValid && worst < 1.0f, "sines at " + juce::String (rate, 0) + " Hz are within 1 cent (worst "
+                                             + juce::String (worst, 2) + ")");
+        }
+
+        {
+            // Plucked-string-like: fundamental weaker than the 2nd and 3rd harmonics, decaying, a bit of noise.
+            float worst = 0.0f;
+            bool allValid = true;
+
+            for (auto f : { 82.41f, 110.0f, 146.83f, 196.0f, 246.94f, 329.63f })
+            {
+                const auto tone = makeTone (48000.0, f, 48000, { 0.3f, 1.0f, 0.8f, 0.5f, 0.4f, 0.3f, 0.2f }, 0.01f, 1.5);
+                const auto r = detector.analyse (tone.data(), (int) tone.size(), 48000.0);
+                allValid = allValid && r.isValid();
+
+                if (r.isValid())
+                    worst = juce::jmax (worst, std::abs (centsBetween (r.frequency, f)));
+            }
+
+            check (allValid && worst < 3.0f, "guitar-like tones: fundamental found, no octave errors (worst "
+                                             + juce::String (worst, 2) + " cents)");
+        }
+
+        {
+            std::vector<float> silence (4096, 0.0f), noise (4096);
+            juce::Random random (7);
+
+            for (auto& n : noise)
+                n = random.nextFloat() * 0.6f - 0.3f;
+
+            check (! detector.analyse (silence.data(), 4096, 48000.0).isValid(), "silence gives no pitch");
+            check (! detector.analyse (noise.data(), 4096, 48000.0).isValid(), "white noise gives no pitch");
+            check (! detector.analyse (silence.data(), 1000, 48000.0).isValid(), "too few samples give no pitch");
+        }
+
+        {
+            const auto a = NoteInfo::fromFrequency (440.0f);
+            const auto e = NoteInfo::fromFrequency (82.41f);
+            const auto sharp = NoteInfo::fromFrequency (445.0f);
+            const auto ref432 = NoteInfo::fromFrequency (432.0f, 432.0f);
+            check (a.name == "A" && a.octave == 4 && std::abs (a.cents) < 0.01f, "440 Hz = A4, 0 cents");
+            check (e.name == "E" && e.octave == 2 && e.midiNote == 40 && std::abs (e.cents) < 0.5f, "82.41 Hz = E2");
+            check (std::abs (sharp.cents - 19.56f) < 0.05f, "445 Hz = A4 +19.6 cents");
+            check (ref432.name == "A" && std::abs (ref432.cents) < 0.01f, "A4 = 432 reference");
+            check (NoteInfo::fromFrequency (277.18f).name == "C#", "sharps are named with #");
+        }
+
+        {
+            PitchSmoother smoother;
+            const auto r = [] (float f) { PitchReading p; p.frequency = f; p.clarity = 1.0f; return p; };
+            smoother.add (r (110.0f), 0.0);
+            smoother.add (r (110.2f), 0.03);
+            smoother.add (r (125.0f), 0.06);        // > 1 semitone away: starts over
+            check (std::abs (smoother.add (r (125.1f), 0.09) - 125.05f) < 0.01f, "smoother restarts on a new note");
+            smoother.reset();
+            smoother.add (r (110.0f), 0.0);
+            smoother.add (r (110.1f), 0.03);
+            smoother.add (r (110.4f), 0.06);        // outlier within the note
+            smoother.add (r (110.1f), 0.09);
+            check (std::abs (smoother.add (r (110.0f), 0.12) - 110.1f) < 0.001f, "smoother shows the median");
+            check (smoother.add ({}, 0.3) > 0.0f, "smoother holds over a short dropout");
+            check (smoother.add ({}, 0.6) == 0.0f, "smoother clears after a long dropout");
+        }
+
+        {
+            // Through the input stage tap, in audio blocks.
+            Tuner tuner;
+            GainMeterProcessor stage ("Input stage", 1);
+            stage.tap = &tuner;
+            stage.prepareToPlay (48000.0, 512);
+            const auto tone = makeTone (48000.0, 110.0, 48000, { 0.5f, 1.0f, 0.6f });
+            juce::AudioBuffer<float> block (1, 512);
+            juce::MidiBuffer midi;
+
+            int fed = 0;
+            auto feed = [&] (int blocks)
+            {
+                for (int b = 0; b < blocks; ++b)
+                {
+                    block.copyFrom (0, 0, tone.data() + (fed++ % 90) * 512, 512);
+                    stage.processBlock (block, midi);
+                }
+            };
+
+            feed (20);
+            check (! tuner.read().isValid(), "inactive tuner ignores the input");
+
+            tuner.active = true;
+            feed (4);
+            check (! tuner.read().isValid(), "tuner waits for a full window");
+            feed (6);
+            const auto reading = tuner.read();
+            check (reading.isValid() && std::abs (centsBetween (reading.frequency, 110.0f)) < 2.0f, "tuner reads A2 from the input stage");
+
+            tuner.clear();
+            check (! tuner.read().isValid(), "cleared tuner forgets old audio");
+            feed (10);
+            check (tuner.read().isValid(), "tuner reads again after clear");
+
+            stage.silenced = true;
+            stage.prepareToPlay (48000.0, 512);
+            block.copyFrom (0, 0, tone.data(), 512);
+            stage.processBlock (block, midi);
+            check (block.getMagnitude (0, 512) == 0.0f, "silenced stage outputs nothing");
+            check (tuner.read().isValid(), "tuner still listens while the guitar is silenced");
+
+            tuner.referenceA4 = 436.0f;
+            tuner.muteWhileTuning = false;
+            Tuner copy;
+            copy.fromXml (*tuner.toXml());
+            check (copy.referenceA4 == 436.0f && ! copy.muteWhileTuning, "tuner settings round trip");
+            juce::XmlElement bad ("TUNER");
+            bad.setAttribute ("referenceA4", 1000.0);
+            copy.fromXml (bad);
+            check (copy.referenceA4 == Tuner::maxReference && copy.muteWhileTuning, "tuner settings are clamped / defaulted");
+        }
+
+        check (FootswitchAction::fromString (FootswitchAction { FootswitchAction::Kind::tuner, 0 }.toString()).kind
+                   == FootswitchAction::Kind::tuner, "footswitch tuner action round trip");
+    }
 }
 
 int main()
@@ -1437,6 +1610,7 @@ int main()
     testMetronomeSettings();
     testLatencyCalibration();
     testLoopFiles();
+    testTuner();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

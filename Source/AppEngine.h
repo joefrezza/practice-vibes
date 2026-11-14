@@ -9,6 +9,7 @@
 #include "PlayerProcessor.h"
 #include "PluginCatalogue.h"
 #include "PluginChain.h"
+#include "Tuner.h"
 
 namespace pv
 {
@@ -50,7 +51,12 @@ public:
     // MIDI pedal board: every incoming message goes to the footswitch first, then to onMidiMessage.
     std::unique_ptr<Footswitch> footswitch;
     std::function<void (const juce::MidiMessage&, const juce::String& sourceName)> onMidiMessage;   // UI (message display)
-    std::function<int()> getBypassTarget;       // chain index the "bypass" footswitch action toggles (default: first plugin)
+    std::function<int()> getBypassTarget;
+    std::function<void()> onToggleTuner;        // UI: open / close the tuner (footswitch action)
+
+    // Listens to the guitar input stage while the tuner is open.
+    std::unique_ptr<Tuner> tuner;
+    void saveTunerSettings();       // chain index the "bypass" footswitch action toggles (default: first plugin)
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;

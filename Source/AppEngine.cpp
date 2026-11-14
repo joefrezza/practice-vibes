@@ -33,6 +33,13 @@ AppEngine::AppEngine()
 
     savedMetronomeSettings = metronome->createSettingsXml()->toString();
 
+    tuner = std::make_unique<Tuner>();
+
+    if (auto xml = juce::parseXML (getTunerFile()))
+        tuner->fromXml (*xml);
+
+    chain->getInputStage().tap = tuner.get();
+
     looper = std::make_unique<Looper> (*metronome);
     chain->setLooperNodes (looper->createBeforeFxNode(), looper->createAfterFxNode());
     chain->setBlockListener (this);
@@ -243,9 +250,19 @@ void AppEngine::performFootswitchAction (FootswitchAction action, double pressSe
             break;
         }
 
+        case Kind::tuner:
+            if (onToggleTuner)
+                onToggleTuner();
+            break;
+
         case Kind::none:
             break;
     }
+}
+
+void AppEngine::saveTunerSettings()
+{
+    tuner->toXml()->writeTo (getTunerFile());
 }
 
 void AppEngine::timerCallback()

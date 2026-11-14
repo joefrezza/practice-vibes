@@ -2,6 +2,7 @@
 #include "LooperPanel.h"
 #include "PracticePanel.h"
 #include "RigPanel.h"
+#include "TunerPanel.h"
 #include "Theme.h"
 
 namespace pv
@@ -114,6 +115,8 @@ public:
 
     std::function<void()> onClose;
 
+    juce::Component* getContent() const noexcept    { return content.get(); }
+
     void paint (juce::Graphics& g) override
     {
         g.fillAll (juce::Colours::black.withAlpha (0.88f));
@@ -174,10 +177,13 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
     titleLabel.setColour (juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible (titleLabel);
 
-    for (auto* b : { &audioSettingsButton, &bluetoothButton, &saveButton })
+    for (auto* b : { &tunerButton, &audioSettingsButton, &bluetoothButton, &saveButton })
         addAndMakeVisible (*b);
 
     audioSettingsButton.onClick = [this] { openAudioSettings(); };
+    tunerButton.onClick = [this] { toggleTuner(); };
+    tunerButton.setTooltip ("Chromatic tuner (a footswitch can open and close it too)");
+    engine.onToggleTuner = [this] { toggleTuner(); };
 
     bluetoothButton.onClick = []
     {
@@ -215,6 +221,7 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
 
 MainComponent::~MainComponent()
 {
+    engine.onToggleTuner = nullptr;
     closeOverlay();
     tabs.clearTabs();
 }
@@ -240,6 +247,7 @@ void MainComponent::resized()
     saveButton.setBounds (top.removeFromRight (100).reduced (4));
     bluetoothButton.setBounds (top.removeFromRight (150).reduced (4));
     audioSettingsButton.setBounds (top.removeFromRight (150).reduced (4));
+    tunerButton.setBounds (top.removeFromRight (90).reduced (4));
     titleLabel.setBounds (top);
 
     tabs.setBounds (area);
@@ -254,6 +262,14 @@ void MainComponent::openAudioSettings()
                                                                           true,    // MIDI inputs
                                                                           false, false, false);
     showOverlay ("Audio settings", std::move (selector));
+}
+
+void MainComponent::toggleTuner()
+{
+    if (overlay->isVisible() && dynamic_cast<TunerPanel*> (overlay->getContent()) != nullptr)
+        closeOverlay();
+    else
+        showOverlay ("Tuner", std::make_unique<TunerPanel> (engine));
 }
 
 void MainComponent::showOverlay (const juce::String& title, std::unique_ptr<juce::Component> content)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "AudioTap.h"
 
 namespace pv
 {
@@ -25,13 +26,19 @@ public:
     /** When true the output is silent. */
     std::atomic<bool> muted { false };
 
+    /** A second, independent mute (the tuner silences the guitar without touching "Monitor"). */
+    std::atomic<bool> silenced { false };
+
+    /** If set, gets a copy of channel 0 after the gain (the tuner listens to the input stage). */
+    std::atomic<AudioTap*> tap { nullptr };
+
     /** Returns the peak level since the last call, and resets it. */
     float takePeak() noexcept { return peak.exchange (0.0f); }
 
     //==============================================================================
     const juce::String getName() const override { return name; }
 
-    void prepareToPlay (double, int) override   { lastGain = targetGain(); }
+    void prepareToPlay (double rate, int) override  { sampleRate = rate; lastGain = targetGain(); }
     void releaseResources() override            {}
 
     bool isBusesLayoutSupported (const BusesLayout& layout) const override
@@ -47,6 +54,9 @@ public:
 
         buffer.applyGainRamp (0, numSamples, lastGain, newGain);
         lastGain = newGain;
+
+        if (auto* t = tap.load (std::memory_order_acquire))
+            t->push (buffer.getReadPointer (0), numSamples, sampleRate);
 
         const auto blockPeak = buffer.getMagnitude (0, numSamples);
 
@@ -70,10 +80,11 @@ public:
     void setStateInformation (const void*, int) override        {}
 
 private:
-    float targetGain() const noexcept { return muted.load() ? 0.0f : gain.load(); }
+    float targetGain() const noexcept { return muted.load() || silenced.load() ? 0.0f : gain.load(); }
 
     juce::String name;
     float lastGain = 1.0f;
+    double sampleRate = 44100.0;
     std::atomic<float> peak { 0.0f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GainMeterProcessor)
