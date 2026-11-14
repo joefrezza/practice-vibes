@@ -276,6 +276,10 @@ public:
         practiseButton.setColour (juce::TextButton::buttonColourId, theme::accent);
         addAndMakeVisible (practiseButton);
 
+        historyButton.onClick = [this] { if (owner.onShowHistory) owner.onShowHistory (topicId); };
+        historyButton.setTooltip ("Tempo, song speed and minutes over the weeks, and every session");
+        addAndMakeVisible (historyButton);
+
         rotationToggle.setTooltip ("Topics in the rotation are listed on the Today tab, most neglected first");
         rotationToggle.onClick = [this] { owner.setRotation (topicId, rotationToggle.getToggleState()); };
         addAndMakeVisible (rotationToggle);
@@ -388,6 +392,7 @@ public:
 
         area.removeFromTop (6);
         auto tagsRow = area.removeFromTop (30);
+        historyButton.setBounds (tagsRow.removeFromRight (90).reduced (0, 1));
         rotationToggle.setBounds (tagsRow.removeFromRight (200).withTrimmedLeft (12));
         tagsEditor.setBounds (tagsRow);
         area.removeFromTop (4);
@@ -452,7 +457,7 @@ private:
     juce::TextEditor titleEditor, tagsEditor, descriptionEditor;
     juce::Label createdLabel, notesLabel, resourcesLabel, conflictLabel, noResourcesLabel;
     juce::TextButton deleteButton { "Delete topic" }, addFilesButton { "Add files..." }, addLinkButton { "Add link..." },
-                     practiseButton { "Practise" };
+                     practiseButton { "Practise" }, historyButton { "History" };
     juce::ToggleButton rotationToggle { "In practice rotation" };
     juce::Viewport viewport;
     juce::Component rowHolder;

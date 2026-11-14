@@ -5,6 +5,7 @@
 #include "AppLog.h"
 #include "Library.h"
 #include "PracticeLog.h"
+#include "PracticePlanner.h"
 
 namespace pv
 {
@@ -50,6 +51,16 @@ private:
     void updatePractisingButton();
     void showPractisingMenu();
 
+    // Dice, sessions, history
+    std::vector<PlanCandidate> rotationCandidates (const juce::String& tag);
+    juce::StringArray rotationTags();
+    void openSessionPlanner (const juce::String& tag);
+    void startSession (std::vector<SessionSlot>);
+    void sessionNext();
+    void sessionExtend();
+    void sessionEnd();
+    void showTopicHistory (const juce::String& topicId);
+
     void layoutYouTube();
     juce::Rectangle<int> defaultCompactBounds() const;
 
@@ -68,6 +79,9 @@ private:
     double lastTrackerTick = 0.0;
     juce::File lastSongFile;
     int practisingButtonCountdown = 0;
+
+    PracticeSession session;
+    int planMinutes = 45;
 
     std::unique_ptr<TodayPanel> todayPanel;
     std::unique_ptr<PracticePanel> practicePanel;

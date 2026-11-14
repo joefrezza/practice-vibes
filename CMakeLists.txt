@@ -84,6 +84,8 @@ target_sources(PracticeVibes PRIVATE
     Source/PluginChain.cpp
     Source/PracticeLog.cpp
     Source/PracticePanel.cpp
+    Source/PracticePlanner.cpp
+    Source/PracticeViews.cpp
     Source/RigPanel.cpp
     Source/TodayPanel.cpp
     Source/Tuner.cpp
@@ -133,6 +135,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         Source/MetronomeProcessor.cpp
         Source/PlayerProcessor.cpp
         Source/PracticeLog.cpp
+        Source/PracticePlanner.cpp
         Source/Tuner.cpp)
 
     target_compile_definitions(PracticeVibesTests PRIVATE

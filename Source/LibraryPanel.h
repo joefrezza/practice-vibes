@@ -32,6 +32,7 @@ public:
     std::function<void()> onTopicsChanged;                         // titles, rotation, topics added/removed...
     std::function<void (const juce::String& topicId)> onTopicOpened;   // one of its resources was opened
     std::function<void (const juce::String& topicId)> onPractise;      // the topic's "Practise" button
+    std::function<void (const juce::String& topicId)> onShowHistory;   // the topic's "History" button
 
     Library* getLibrary() const noexcept            { return library.get(); }
 

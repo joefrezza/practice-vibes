@@ -44,11 +44,15 @@ public:
         practiseButton.setButtonText (active ? "Practising" : "Practise");
         practiseButton.setEnabled (! active);
         addAndMakeVisible (practiseButton);
+        historyButton.onClick = [this] { if (onHistory) onHistory (topicId); };
+        historyButton.setTooltip ("Tempo, song speed and minutes over the weeks, and every session");
+        historyButton.setEnabled (s.sessions > 0);
+        addAndMakeVisible (historyButton);
         setMouseCursor (juce::MouseCursor::PointingHandCursor);
         setTooltip ("Click to open the topic; Practise brings back last time's song, loop, speed and tempo");
     }
 
-    std::function<void (const juce::String&)> onPractise, onShow;
+    std::function<void (const juce::String&)> onPractise, onShow, onHistory;
 
     void paint (juce::Graphics& g) override
     {
@@ -63,7 +67,7 @@ public:
         }
 
         auto inner = getLocalBounds().reduced (12, 8);
-        inner.removeFromRight (practiseButton.getWidth() + 12);
+        inner.removeFromRight (getWidth() - historyButton.getX() + 12);
 
         g.setColour (juce::Colours::white);
         g.setFont (juce::FontOptions (16.0f).withStyle ("Bold"));
@@ -92,7 +96,10 @@ public:
 
     void resized() override
     {
-        practiseButton.setBounds (getLocalBounds().reduced (10).removeFromRight (110).withSizeKeepingCentre (110, 34));
+        auto r = getLocalBounds().reduced (10);
+        practiseButton.setBounds (r.removeFromRight (110).withSizeKeepingCentre (110, 34));
+        r.removeFromRight (6);
+        historyButton.setBounds (r.removeFromRight (84).withSizeKeepingCentre (84, 34));
     }
 
     void mouseUp (const juce::MouseEvent& e) override
@@ -106,7 +113,7 @@ private:
     juce::StringArray tags;
     PracticeLog::TopicSummary summary;
     bool active;
-    juce::TextButton practiseButton;
+    juce::TextButton practiseButton, historyButton { "History" };
 };
 
 //==============================================================================
@@ -240,7 +247,7 @@ private:
 };
 
 //==============================================================================
-TodayPanel::TodayPanel (PracticeTracker& t) : tracker (t)
+TodayPanel::TodayPanel (PracticeTracker& t, const PracticeSession& s) : tracker (t), session (s)
 {
     titleLabel.setFont (juce::FontOptions (22.0f).withStyle ("Bold"));
     titleLabel.setColour (juce::Label::textColourId, juce::Colours::white);
@@ -287,7 +294,53 @@ TodayPanel::TodayPanel (PracticeTracker& t) : tracker (t)
         addAndMakeVisible (*l);
     }
 
-    rotationHeader.setText ("Practice rotation - longest neglected first", juce::dontSendNotification);
+    rotationHeader.setText ("Practice rotation", juce::dontSendNotification);
+    rotationHeader.setTooltip ("Longest neglected first");
+
+    diceButton.setTooltip ("Pick one rotation topic at random - the longer you've left one, the likelier it comes up");
+    diceButton.onClick = [this] { rollDice(); };
+    planButton.setTooltip ("Say how long you have: a few rotation topics with time slots, ready to start");
+    planButton.setColour (juce::TextButton::buttonColourId, theme::accent);
+    planButton.onClick = [this] { if (onPlanSession) onPlanSession (focusTag()); };
+    focusBox.setTooltip ("Only topics with this tag, for the dice and the session planner");
+    focusBox.addItem ("All tags", 1);
+    focusBox.setSelectedId (1, juce::dontSendNotification);
+
+    for (auto* c : std::initializer_list<juce::Component*> { &diceButton, &planButton, &focusBox })
+        addAndMakeVisible (*c);
+
+    diceLabel.setFont (juce::FontOptions (16.0f).withStyle ("Bold"));
+    diceLabel.setColour (juce::Label::textColourId, juce::Colours::black);
+    diceLabel.setMinimumHorizontalScale (0.7f);
+    dicePractiseButton.onClick = [this]
+    {
+        const auto id = diceTopicId;
+        diceTopicId = {};
+        resized();
+
+        if (onPractise)
+            onPractise (id);
+    };
+    diceAgainButton.onClick = [this] { rollDice(); };
+    diceCloseButton.onClick = [this] { diceTopicId = {}; resized(); repaint(); };
+
+    for (auto* c : std::initializer_list<juce::Component*> { &diceLabel, &dicePractiseButton, &diceAgainButton, &diceCloseButton })
+        addChildComponent (*c);
+
+    sessionTitle.setFont (juce::FontOptions (17.0f).withStyle ("Bold"));
+    sessionTitle.setColour (juce::Label::textColourId, juce::Colours::white);
+    addChildComponent (sessionTitle);
+    nextButton.setColour (juce::TextButton::buttonColourId, theme::accent);
+    nextButton.onClick = [this] { if (onSessionNext) onSessionNext(); };
+    extendButton.onClick = [this] { if (onSessionExtend) onSessionExtend(); };
+    endButton.onClick = [this]
+    {
+        if (session.isRunning()) { if (onSessionEnd) onSessionEnd(); }
+        else if (onSessionDismiss) onSessionDismiss();
+    };
+
+    for (auto* c : { &nextButton, &extendButton, &endButton })
+        addChildComponent (*c);
     recentHeader.setText ("Last two weeks", juce::dontSendNotification);
 
     rotationEmpty.setJustificationType (juce::Justification::topLeft);
@@ -342,6 +395,7 @@ void TodayPanel::refresh()
         auto row = std::make_unique<RotationRow> (*topic, summary, topic->id == tracker.getActiveTopicId());
         row->onPractise = [this] (const juce::String& id) { if (onPractise) onPractise (id); };
         row->onShow = [this] (const juce::String& id) { if (onShowTopic) onShowTopic (id); };
+        row->onHistory = [this] (const juce::String& id) { if (onShowHistory) onShowHistory (id); };
         rotationHolder.addAndMakeVisible (*row);
         rows.push_back (std::move (row));
     }
@@ -355,8 +409,110 @@ void TodayPanel::refresh()
 
     recentView->setEntries (log != nullptr ? log->getEntries() : std::vector<PracticeEntry> {});
     shownActiveId = tracker.getActiveTopicId();
+
+    // Focus tags: keep the choice if the tag still exists.
+    const auto tags = getRotationTags ? getRotationTags() : juce::StringArray();
+    const auto chosen = focusTag();
+    focusBox.clear (juce::dontSendNotification);
+    focusBox.addItem ("All tags", 1);
+
+    for (int i = 0; i < tags.size(); ++i)
+        focusBox.addItem ("#" + tags[i], i + 2);
+
+    const auto index = tags.indexOf (chosen, true);
+    focusBox.setSelectedId (index >= 0 ? index + 2 : 1, juce::dontSendNotification);
+
+    diceButton.setEnabled (! rows.empty());
+    planButton.setEnabled (! rows.empty());
+
+    if (diceTopicId.isNotEmpty() && (library == nullptr || library->findTopic (diceTopicId) == nullptr))
+        diceTopicId = {};
+
     updateNow();
+    updateSession();
     resized();
+}
+
+juce::String TodayPanel::focusTag() const
+{
+    return focusBox.getSelectedId() > 1 ? focusBox.getText().substring (1) : juce::String();
+}
+
+void TodayPanel::rollDice()
+{
+    auto candidates = getCandidates ? getCandidates (focusTag()) : std::vector<PlanCandidate> {};
+
+    // Not what you're on now, nor the same pick twice in a row (when there's a choice).
+    juce::StringArray exclude { tracker.getActiveTopicId(), diceTopicId };
+    auto pick = pickWeighted (candidates, random, exclude);
+
+    if (pick < 0)
+        pick = pickWeighted (candidates, random);
+
+    if (pick < 0)
+    {
+        diceTopicId = {};
+        diceLabel.setText ({}, juce::dontSendNotification);
+        resized();
+        return;
+    }
+
+    const auto& c = candidates[(size_t) pick];
+    diceTopicId = c.topicId;
+
+    juce::String when = "not practised yet";
+
+    if (auto* log = tracker.getLog())
+        if (const auto last = log->summarise (c.topicId).last; last != juce::Time())
+            when = "last practised " + formatPracticeAgo (last, juce::Time::getCurrentTime());
+
+    diceLabel.setText ("The dice says: " + c.title + "   (" + when + ")", juce::dontSendNotification);
+    resized();
+    repaint();
+}
+
+void TodayPanel::updateSession()
+{
+    const auto visible = sessionVisible();
+
+    for (juce::Component* c : { (juce::Component*) &sessionTitle, (juce::Component*) &nextButton,
+                                (juce::Component*) &extendButton, (juce::Component*) &endButton })
+        c->setVisible (visible);
+
+    if (visible)
+    {
+        if (session.isRunning())
+        {
+            const auto n = (int) session.getSlots().size();
+            sessionTitle.setText (session.isTimeUp() ? juce::String ("Time's up!")
+                                                     : "Session: topic " + juce::String (session.getIndex() + 1) + " of " + juce::String (n),
+                                  juce::dontSendNotification);
+            sessionTitle.setColour (juce::Label::textColourId, session.isTimeUp() ? theme::highlight : juce::Colours::white);
+            nextButton.setButtonText (session.getNext() != nullptr ? "Next topic" : "Finish");
+            nextButton.setVisible (true);
+            extendButton.setVisible (true);
+            endButton.setButtonText ("End");
+        }
+        else
+        {
+            const auto reached = session.getTopicsReached();
+            sessionTitle.setText ("Session over: " + formatPracticeDuration (session.getElapsedSeconds()) + ", "
+                                      + juce::String (reached) + (reached == 1 ? " topic" : " topics"),
+                                  juce::dontSendNotification);
+            sessionTitle.setColour (juce::Label::textColourId, juce::Colours::white);
+            nextButton.setVisible (false);
+            extendButton.setVisible (false);
+            endButton.setButtonText ("Close");
+        }
+    }
+
+    if (visible != sessionShown)
+    {
+        sessionShown = visible;
+        resized();
+    }
+
+    repaint (sessionCard);
 }
 
 void TodayPanel::updateNow()
@@ -418,6 +574,8 @@ void TodayPanel::timerCallback()
         refresh();
     else
         updateNow();
+
+    updateSession();
 }
 
 void TodayPanel::visibilityChanged()
@@ -437,6 +595,48 @@ void TodayPanel::paint (juce::Graphics& g)
     g.fillAll (theme::background);
     g.setColour (theme::panel);
     g.fillRoundedRectangle (nowCard.toFloat(), 8.0f);
+
+    if (! diceStrip.isEmpty())
+    {
+        g.setColour (theme::highlight);
+        g.fillRoundedRectangle (diceStrip.toFloat(), 6.0f);
+    }
+
+    if (sessionShown && ! sessionCard.isEmpty())
+    {
+        g.setColour (theme::panel);
+        g.fillRoundedRectangle (sessionCard.toFloat(), 8.0f);
+
+        if (session.isRunning() && session.isTimeUp())
+        {
+            g.setColour (theme::highlight);
+            g.drawRoundedRectangle (sessionCard.toFloat().reduced (1.0f), 8.0f, 2.0f);
+        }
+
+        const auto& slots = session.getSlots();
+        auto r = sessionLines;
+
+        for (int i = 0; i < (int) slots.size(); ++i)
+        {
+            auto line = r.removeFromTop (24);
+            const auto current = session.isRunning() && i == session.getIndex();
+            const auto done = i < session.getIndex() || (! session.isRunning() && i <= session.getIndex());
+
+            juce::String right = juce::String (slots[(size_t) i].minutes) + " min";
+
+            if (current)
+                right = session.isTimeUp() ? "over by " + formatClock (-session.getRemainingSeconds())
+                                           : formatClock (session.getRemainingSeconds()) + " left";
+            else if (done)
+                right = "done";
+
+            g.setFont (current ? juce::FontOptions (15.0f).withStyle ("Bold") : juce::FontOptions (15.0f));
+            g.setColour (current ? theme::highlight : juce::Colours::white.withAlpha (done ? 0.45f : 0.8f));
+            g.drawText (right, line, juce::Justification::centredRight, false);
+            g.drawText (juce::String (i + 1) + ".  " + slots[(size_t) i].title,
+                        line.withTrimmedRight (120), juce::Justification::centredLeft, true);
+        }
+    }
 }
 
 void TodayPanel::resized()
@@ -462,10 +662,30 @@ void TodayPanel::resized()
         left = area;
     }
 
-    // Now card: on top of the right column (or of everything when narrow).
+    // Now card (and the session card): on top of the right column (or of everything when narrow).
     auto& cardColumn = wide ? right : left;
     nowCard = cardColumn.removeFromTop (124);
     cardColumn.removeFromTop (12);
+
+    sessionCard = {};
+
+    if (sessionShown)
+    {
+        const auto lines = (int) session.getSlots().size();
+        sessionCard = cardColumn.removeFromTop (44 + 24 * lines + 52);
+        cardColumn.removeFromTop (12);
+
+        auto sc = sessionCard.reduced (14, 10);
+        sessionTitle.setBounds (sc.removeFromTop (28));
+        auto buttons = sc.removeFromBottom (38);
+        endButton.setBounds (buttons.removeFromRight (90).reduced (0, 2));
+        buttons.removeFromRight (6);
+        extendButton.setBounds (buttons.removeFromRight (90).reduced (0, 2));
+        buttons.removeFromRight (6);
+        nextButton.setBounds (buttons.removeFromRight (120).reduced (0, 2));
+        sc.removeFromTop (4);
+        sessionLines = sc;
+    }
 
     auto card = nowCard.reduced (14, 10);
     auto cardTop = card.removeFromTop (28);
@@ -482,8 +702,36 @@ void TodayPanel::resized()
         left.removeFromBottom (12);
     }
 
-    rotationHeader.setBounds (left.removeFromTop (30));
-    left.removeFromTop (4);
+    auto headerRow = left.removeFromTop (36);
+    planButton.setBounds (headerRow.removeFromRight (150).reduced (0, 2));
+    headerRow.removeFromRight (6);
+    diceButton.setBounds (headerRow.removeFromRight (130).reduced (0, 2));
+    headerRow.removeFromRight (6);
+    focusBox.setBounds (headerRow.removeFromRight (juce::jmin (150, juce::jmax (90, headerRow.getWidth() - 160))).reduced (0, 3));
+    rotationHeader.setBounds (headerRow);
+    left.removeFromTop (6);
+
+    const auto showDice = diceTopicId.isNotEmpty();
+    diceStrip = {};
+
+    for (juce::Component* c : { (juce::Component*) &diceLabel, (juce::Component*) &dicePractiseButton,
+                                (juce::Component*) &diceAgainButton, (juce::Component*) &diceCloseButton })
+        c->setVisible (showDice);
+
+    if (showDice)
+    {
+        diceStrip = left.removeFromTop (50);
+        left.removeFromTop (8);
+        auto d = diceStrip.reduced (10, 7);
+        diceCloseButton.setBounds (d.removeFromRight (36));
+        d.removeFromRight (6);
+        diceAgainButton.setBounds (d.removeFromRight (110));
+        d.removeFromRight (6);
+        dicePractiseButton.setBounds (d.removeFromRight (100));
+        d.removeFromRight (8);
+        diceLabel.setBounds (d);
+    }
+
     rotationViewport.setBounds (left);
     rotationEmpty.setBounds (left.withHeight (juce::jmin (left.getHeight(), 120)));
 

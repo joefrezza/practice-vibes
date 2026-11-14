@@ -75,6 +75,9 @@ public:
     /** Starts from startBpm, on beat 1. */
     void start();
     void stop();
+
+    /** A soft two-note chime (a practice session's slot is over); plays even while stopped or muted. */
+    void requestChime()                         { chimeRequested = true; }
     bool isRunning() const noexcept             { return running.load(); }
 
     /** Applies a startBpm change immediately while running (otherwise on next start). */
@@ -196,6 +199,10 @@ private:
     std::atomic<bool> tempoLocked { false };
 
     std::array<Voice, 8> voices;
+
+    std::atomic<bool> chimeRequested { false };
+    double chimePhase[2] {}, chimeSeconds = 10.0;
+    float renderChime();
     size_t nextVoice = 0;
     juce::Random random;
     float lastGain = 0.7f;

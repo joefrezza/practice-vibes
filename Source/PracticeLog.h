@@ -94,6 +94,15 @@ public:
     /** Played time of entries starting in [from, to). */
     double playedBetween (juce::Time from, juce::Time to) const;
 
+    /** The topic's entries, oldest first. */
+    std::vector<const PracticeEntry*> historyFor (const juce::String& topicId) const;
+
+    /** Played seconds per calendar week (Monday to Sunday) for the topic, oldest first; the last one is this week. */
+    std::vector<double> weeklySeconds (const juce::String& topicId, juce::Time now, int weeks) const;
+
+    /** Monday 00:00 of the week holding `t` (local time). */
+    static juce::Time startOfWeek (juce::Time t);
+
     /** A stable id for this device (made once, kept in the app's data folder). */
     static juce::String getThisDeviceId();
 

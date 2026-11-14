@@ -2,6 +2,7 @@
 #include "LibraryPanel.h"
 #include "LooperPanel.h"
 #include "PracticePanel.h"
+#include "PracticeViews.h"
 #include "RigPanel.h"
 #include "TodayPanel.h"
 #include "TunerPanel.h"
@@ -215,7 +216,7 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
 
     saveButton.onClick = [this] { engine.saveState(); };
 
-    todayPanel = std::make_unique<TodayPanel> (tracker);
+    todayPanel = std::make_unique<TodayPanel> (tracker, session);
     practicePanel = std::make_unique<PracticePanel> (*engine.player, *engine.metronome);
     libraryPanel = std::make_unique<LibraryPanel>();
     looperPanel = std::make_unique<LooperPanel> (engine);
@@ -239,6 +240,7 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
     libraryPanel->onLibraryOpened = [this] { libraryOpened(); };
     libraryPanel->onTopicsChanged = [this] { todayPanel->refresh(); updatePractisingButton(); };
     libraryPanel->onPractise = [this] (const juce::String& id) { practiseTopic (id); };
+    libraryPanel->onShowHistory = [this] (const juce::String& id) { showTopicHistory (id); };
     libraryPanel->onTopicOpened = [this] (const juce::String& id)
     {
         if (auto* lib = libraryPanel->getLibrary())
@@ -250,6 +252,14 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
 
     todayPanel->getLibrary = [this] { return libraryPanel->getLibrary(); };
     todayPanel->onPractise = [this] (const juce::String& id) { practiseTopic (id); };
+    todayPanel->onShowHistory = [this] (const juce::String& id) { showTopicHistory (id); };
+    todayPanel->getCandidates = [this] (const juce::String& tag) { return rotationCandidates (tag); };
+    todayPanel->getRotationTags = [this] { return rotationTags(); };
+    todayPanel->onPlanSession = [this] (const juce::String& tag) { openSessionPlanner (tag); };
+    todayPanel->onSessionNext = [this] { sessionNext(); };
+    todayPanel->onSessionExtend = [this] { sessionExtend(); };
+    todayPanel->onSessionEnd = [this] { sessionEnd(); };
+    todayPanel->onSessionDismiss = [this] { session.dismiss(); updatePractisingButton(); };
     todayPanel->onShowTopic = [this] (const juce::String& id)
     {
         libraryPanel->selectTopic (id);
@@ -495,6 +505,13 @@ void MainComponent::tickTracker()
 
     tracker.tick (seconds, engine.chain->getInputStage().takeActivityPeak(), activity, juce::Time::getCurrentTime());
 
+    // A session slot's time is up: a soft chime (no forced move: you go on when you're ready).
+    if (session.tick (seconds))
+    {
+        engine.metronome->requestChime();
+        updatePractisingButton();
+    }
+
     if (--practisingButtonCountdown <= 0)
         updatePractisingButton();
 }
@@ -508,14 +525,51 @@ void MainComponent::updatePractisingButton()
     if (active && tracker.getActiveSeconds() >= 30.0)
         text << "  -  " << formatPracticeDuration (tracker.getActiveSeconds());
 
-    practisingButton.setButtonText ((tracker.isPlaying() ? juce::String ("(playing) ") : juce::String()) + text);
-    practisingButton.setColour (juce::TextButton::buttonColourId,
-                                active ? theme::accent : getLookAndFeel().findColour (juce::TextButton::buttonColourId));
+    if (const auto* slot = session.getCurrent())
+    {
+        const auto n = (int) session.getSlots().size();
+        text = juce::String (session.getIndex() + 1) + "/" + juce::String (n) + "  " + slot->title + "  -  "
+             + formatClock (juce::jmax (0.0, session.getRemainingSeconds()));
+
+        if (session.isTimeUp())
+            text = session.getNext() != nullptr ? "Time's up - next: " + session.getNext()->title
+                                                : juce::String ("Time's up - finish the session");
+    }
+
+    practisingButton.setButtonText ((tracker.isPlaying() && ! session.isTimeUp() ? juce::String ("(playing) ") : juce::String()) + text);
+
+    if (session.isRunning() && session.isTimeUp())
+    {
+        practisingButton.setColour (juce::TextButton::buttonColourId, theme::highlight);
+        practisingButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
+    }
+    else
+    {
+        practisingButton.removeColour (juce::TextButton::textColourOffId);
+
+        if (active)
+            practisingButton.setColour (juce::TextButton::buttonColourId, theme::accent);
+        else
+            practisingButton.removeColour (juce::TextButton::buttonColourId);
+    }
 }
 
 void MainComponent::showPractisingMenu()
 {
     juce::PopupMenu menu;
+
+    if (session.isRunning())
+    {
+        if (const auto* next = session.getNext())
+            menu.addItem ("Next topic: " + next->title, [this] { sessionNext(); });
+        else
+            menu.addItem ("Finish the session", [this] { sessionNext(); });
+
+        menu.addItem ("5 more minutes", [this] { sessionExtend(); });
+        menu.addItem ("End the session", [this] { sessionEnd(); });
+        menu.addSeparator();
+    }
+
     menu.addItem ("Open the Today tab", [this] { showTab (todayPanel.get()); });
 
     if (tracker.getActiveTopicId().isNotEmpty())
@@ -537,9 +591,16 @@ void MainComponent::showPractisingMenu()
         menu.addSeparator();
 
         if (topics.getNumItems() > 0)
+        {
             menu.addSubMenu ("Practise a rotation topic", topics);
+
+            if (! session.isRunning())
+                menu.addItem ("Plan a session...", [this] { openSessionPlanner ({}); });
+        }
         else
+        {
             menu.addItem ("No topics in the practice rotation yet", false, false, [] {});
+        }
     }
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&practisingButton));
@@ -550,6 +611,123 @@ juce::Rectangle<int> MainComponent::defaultCompactBounds() const
     const auto w = YouTubePlayer::compactVideoWidth + 2;
     const auto h = YouTubePlayer::compactVideoHeight + YouTubePlayer::compactBarHeight + 1;
     return { getWidth() - w - 16, getHeight() - h - 16, w, h };
+}
+
+//==============================================================================
+std::vector<PlanCandidate> MainComponent::rotationCandidates (const juce::String& tag)
+{
+    std::vector<PlanCandidate> result;
+
+    if (auto* lib = libraryPanel->getLibrary())
+    {
+        const auto now = juce::Time::getCurrentTime();
+
+        for (auto& t : lib->getTopics())
+            if (t.inRotation && t.matchesTag (tag))
+                result.push_back ({ t.id, t.title.isNotEmpty() ? t.title : juce::String ("(untitled)"),
+                                    neglectWeight (practiceLog != nullptr ? practiceLog->summarise (t.id).last : juce::Time(), now) });
+    }
+
+    return result;
+}
+
+juce::StringArray MainComponent::rotationTags()
+{
+    juce::StringArray tags;
+
+    if (auto* lib = libraryPanel->getLibrary())
+    {
+        for (auto& t : lib->getTopics())
+        {
+            if (! t.inRotation)
+                continue;
+
+            for (auto& tag : t.tags)
+                if (! hasTag (tags, tag))
+                    tags.add (tag);
+
+            for (auto& r : t.resources)
+                for (auto& tag : r.tags)
+                    if (! hasTag (tags, tag))
+                        tags.add (tag);
+        }
+    }
+
+    tags.sortNatural();
+    return tags;
+}
+
+void MainComponent::openSessionPlanner (const juce::String& tag)
+{
+    auto planner = std::make_unique<SessionPlanner> ([this] (const juce::String& t) { return rotationCandidates (t); },
+                                                     rotationTags(), planMinutes, tag);
+    planner->onCancel = [this] { juce::MessageManager::callAsync ([safe = SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->closeOverlay(); }); };
+    planner->onStart = [this] (std::vector<SessionSlot> slots, int minutes, const juce::String&)
+    {
+        planMinutes = minutes;
+
+        // Not from inside the planner's own button click: starting closes (deletes) the planner.
+        juce::MessageManager::callAsync ([safe = SafePointer<MainComponent> (this), slots]
+        {
+            if (safe != nullptr)
+                safe->startSession (slots);
+        });
+    };
+    showOverlay ("Plan a practice session", std::move (planner));
+}
+
+void MainComponent::startSession (std::vector<SessionSlot> slots)
+{
+    closeOverlay();
+
+    if (slots.empty())
+        return;
+
+    session.start (slots);
+    practiseTopic (slots.front().topicId);
+    updatePractisingButton();
+    todayPanel->refresh();
+}
+
+void MainComponent::sessionNext()
+{
+    if (session.next())
+    {
+        if (const auto* slot = session.getCurrent())
+            practiseTopic (slot->topicId);
+    }
+    else
+    {
+        showTab (todayPanel.get());   // the session is over: the Today tab shows the summary
+    }
+
+    updatePractisingButton();
+    todayPanel->refresh();
+}
+
+void MainComponent::sessionExtend()
+{
+    session.extend (5);
+    updatePractisingButton();
+}
+
+void MainComponent::sessionEnd()
+{
+    session.stop();
+    updatePractisingButton();
+    todayPanel->refresh();
+}
+
+void MainComponent::showTopicHistory (const juce::String& topicId)
+{
+    auto* lib = libraryPanel->getLibrary();
+    auto* topic = lib != nullptr ? lib->findTopic (topicId) : nullptr;
+
+    if (topic == nullptr || practiceLog == nullptr)
+        return;
+
+    tracker.flush();   // include what you're playing right now
+    showOverlay ("History: " + topic->title, std::make_unique<TopicHistory> (*practiceLog, topicId));
 }
 
 void MainComponent::layoutYouTube()

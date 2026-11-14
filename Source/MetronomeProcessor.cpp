@@ -121,6 +121,37 @@ void MetronomeProcessor::trigger (double frequency, double frequencyEnd, float t
     v.lastNoise = 0.0f;
 }
 
+float MetronomeProcessor::renderChime()
+{
+    if (chimeRequested.exchange (false))
+    {
+        chimeSeconds = 0.0;
+        chimePhase[0] = chimePhase[1] = 0.0;
+    }
+
+    if (chimeSeconds > 2.5)
+        return 0.0f;
+
+    // G5 then D6 120 ms later, each a sine with a 5 ms attack and a slow decay.
+    constexpr double freqs[2] = { 783.99, 1174.66 }, delays[2] = { 0.0, 0.12 };
+    float out = 0.0f;
+
+    for (int n = 0; n < 2; ++n)
+    {
+        const auto t = chimeSeconds - delays[n];
+
+        if (t < 0.0)
+            continue;
+
+        const auto envelope = juce::jmin (1.0, t / 0.005) * std::exp (-t / 0.45);
+        out += (float) (0.16 * envelope * std::sin (chimePhase[n]));
+        chimePhase[n] += juce::MathConstants<double>::twoPi * freqs[n] / sampleRate;
+    }
+
+    chimeSeconds += 1.0 / sampleRate;
+    return out;
+}
+
 float MetronomeProcessor::renderVoices()
 {
     float out = 0.0f;
@@ -434,7 +465,7 @@ void MetronomeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
         // Voices keep ringing briefly after stop, so stopping never clicks.
         const auto g = lastGain + (targetGain - lastGain) * ((float) i / (float) numSamples);
-        const auto sample = juce::jlimit (-1.0f, 1.0f, renderVoices() * g);
+        const auto sample = juce::jlimit (-1.0f, 1.0f, renderVoices() * g + renderChime());
         left[i] = sample;
 
         if (right != nullptr)

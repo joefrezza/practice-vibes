@@ -11,10 +11,12 @@
 #include "../Source/MetronomeProcessor.h"
 #include "../Source/PlayerProcessor.h"
 #include "../Source/PracticeLog.h"
+#include "../Source/PracticePlanner.h"
 #include "../Source/Tuner.h"
 #include "../Source/GainMeterProcessor.h"
 
 #include <iostream>
+#include <map>
 #include <thread>
 
 using namespace pv;
@@ -2231,6 +2233,165 @@ static void testPracticeLog()
     root.deleteRecursively();
 }
 
+static void testPracticePlanner()
+{
+    std::cout << "Practice planner (dice, sessions, weekly history, chime)" << std::endl;
+
+    const auto now = juce::Time (2026, 10, 14, 17, 0, 0, 0, true);   // Sat 14 Nov 2026
+
+    check (neglectWeight (juce::Time(), now) == 30.0 && neglectWeight (now - juce::RelativeTime::days (9), now) > 8.9
+               && neglectWeight (now - juce::RelativeTime::hours (1), now) == 0.5 && neglectWeight (now - juce::RelativeTime::days (90), now) == 30.0,
+           "neglect weight: never = 30, days since, at least 0.5, at most 30");
+
+    std::vector<PlanCandidate> topics { { "fresh", "Practised today", 0.5 }, { "old", "Two weeks ago", 14.0 },
+                                        { "never", "Never", 30.0 }, { "mid", "Five days ago", 5.0 } };
+    juce::Random random (7);
+
+    // The dice: neglected topics come up more often, but everything can come up.
+    {
+        std::map<juce::String, int> counts;
+
+        for (int i = 0; i < 10000; ++i)
+            ++counts[topics[(size_t) pickWeighted (topics, random)].topicId];
+
+        check (counts["never"] > counts["old"] && counts["old"] > counts["mid"] && counts["mid"] > counts["fresh"] && counts["fresh"] > 0,
+               "dice favours neglected topics: never " + juce::String (counts["never"]) + ", 2 weeks " + juce::String (counts["old"])
+                   + ", 5 days " + juce::String (counts["mid"]) + ", today " + juce::String (counts["fresh"]));
+        check (std::abs (counts["never"] / 10000.0 - 30.0 / 49.5) < 0.03, "pick frequency follows the weights");
+
+        bool neverExcluded = true;
+
+        for (int i = 0; i < 500; ++i)
+            neverExcluded = neverExcluded && topics[(size_t) pickWeighted (topics, random, { "never", "old" })].topicId != "never";
+
+        check (neverExcluded, "excluded topics are never picked");
+        check (pickWeighted (topics, random, { "fresh", "old", "never", "mid" }) == -1 && pickWeighted ({}, random) == -1,
+               "nothing left: no pick");
+    }
+
+    // Session plans
+    {
+        auto plan = planSession (topics, 45, random);
+        juce::StringArray ids;
+
+        for (auto& s : plan)
+            ids.addIfNotAlreadyThere (s.topicId);
+
+        check (plan.size() == 4 && ids.size() == 4, "45 min -> 4 different topics: " + juce::String ((int) plan.size()));
+        check (totalMinutes (plan) == 45 && plan[1].minutes == 10 && plan[0].minutes == 15, "45 min split 15 + 10 + 10 + 10");
+
+        auto shortPlan = planSession (topics, 15, random);
+        check (shortPlan.size() == 1 && shortPlan[0].minutes == 15, "15 min -> one topic");
+
+        auto longPlan = planSession (topics, 120, random);
+        check (longPlan.size() == 4 && totalMinutes (longPlan) == 120, "more time than topics: each topic once, time spread: "
+                                                                          + juce::String ((int) longPlan.size()) + " slots");
+
+        std::vector<PlanCandidate> two (topics.begin(), topics.begin() + 2);
+        auto plan2 = planSession (two, 45, random);
+        check (plan2.size() == 2 && rerollSlot (plan2, 0, two, random) == false, "re-roll with no other topic left: nothing changes");
+
+        const auto before = plan[2].topicId;
+        auto withSpare = topics;
+        withSpare.push_back ({ "spare", "Spare", 3.0 });
+        const auto ok = rerollSlot (plan, 2, withSpare, random);
+        check (ok && plan[2].topicId == "spare" && plan[2].topicId != before, "re-roll picks a topic not already in the session");
+        check (planSession ({}, 45, random).empty(), "no rotation topics: empty plan");
+    }
+
+    // A running session
+    {
+        PracticeSession s;
+        s.start ({ { "a", "A", 10 }, { "b", "B", 5 } });
+        check (s.isRunning() && s.getCurrent()->topicId == "a" && s.getNext()->topicId == "b", "session starts on the first slot");
+
+        int announced = 0;
+
+        for (int i = 0; i < 6100; ++i)   // 610 s in 0.1 s ticks
+            announced += s.tick (0.1) ? 1 : 0;
+
+        check (announced == 1 && s.isTimeUp() && s.isRunning() && std::abs (s.getRemainingSeconds() + 10.0) < 0.2,
+               "time's up announced once; the slot keeps going (10 s over)");
+
+        s.extend (5);
+        check (! s.isTimeUp() && std::abs (s.getRemainingSeconds() - 300.0) < 0.2, "+5 min after time's up gives five full minutes");
+
+        for (int i = 0; i < 3010; ++i)
+            announced += s.tick (0.1) ? 1 : 0;
+
+        check (announced == 2, "announced again when the extra time runs out");
+
+        check (s.next() && s.getCurrent()->topicId == "b" && s.getNext() == nullptr && ! s.isTimeUp(), "next slot, fresh clock");
+        check (! s.next() && ! s.isRunning() && s.isFinished() && s.getTopicsReached() == 2, "next on the last slot ends the session");
+        check (std::abs (s.getElapsedSeconds() - 911.0) < 0.5, "total elapsed: " + juce::String (s.getElapsedSeconds(), 1) + " s");
+        s.dismiss();
+        check (! s.isFinished(), "summary dismissed");
+
+        s.start ({ { "a", "A", 10 }, { "b", "B", 5 }, { "c", "C", 5 } });
+        s.stop();
+        check (s.isFinished() && s.getTopicsReached() == 1 && s.getCurrent() == nullptr, "ending early: summary of what was reached");
+        check (s.tick (1000.0) == false, "a stopped session doesn't tick");
+    }
+
+    check (formatClock (365.0) == "6:05" && formatClock (-90.0) == "-1:30" && formatClock (0.4) == "0:01", "clock texts");
+
+    // Weekly history
+    {
+        juce::TemporaryFile temp;
+        const auto folder = temp.getFile();
+        PracticeLog log (folder, "aaaaaaaa");
+        int n = 0;
+
+        auto add = [&] (juce::Time start, double minutes, const char* topic)
+        {
+            PracticeEntry e;
+            e.id = "w" + juce::String (++n);
+            e.topicId = topic;
+            e.start = start;
+            e.end = start + juce::RelativeTime::minutes (minutes);
+            e.playedSeconds = minutes * 60.0;
+            log.save (e);
+        };
+
+        const auto monday = PracticeLog::startOfWeek (now);
+        check (monday.getDayOfWeek() == 1 && monday.getHours() == 0 && monday.getDayOfMonth() == 9, "week starts Monday 9 Nov 00:00");
+        check (PracticeLog::startOfWeek (monday) == monday && PracticeLog::startOfWeek (monday - juce::RelativeTime::seconds (1)).getDayOfMonth() == 2,
+               "Monday 00:00 is in its own week; Sunday night in the previous one");
+
+        add (now, 20, "T");                                        // this week
+        add (monday + juce::RelativeTime::hours (1), 10, "T");     // this week, Monday
+        add (monday - juce::RelativeTime::hours (1), 15, "T");     // last week, Sunday night
+        add (now - juce::RelativeTime::days (28), 30, "T");        // 4 weeks ago
+        add (now - juce::RelativeTime::days (200), 99, "T");       // too old
+        add (now, 50, "Other");                                    // another topic
+
+        const auto weeks = log.weeklySeconds ("T", now, 12);
+        check (weeks.size() == 12 && weeks[11] == 30 * 60.0 && weeks[10] == 15 * 60.0 && weeks[7] == 30 * 60.0,
+               "minutes per week: this week 30, last week 15, 4 weeks ago 30");
+        double total = 0.0;
+
+        for (auto w : weeks)
+            total += w;
+
+        check (total == 75 * 60.0, "older entries and other topics aren't counted");
+        check (log.historyFor ("T").size() == 5 && log.historyFor ("T").front()->playedSeconds == 99 * 60.0, "a topic's history, oldest first");
+        folder.deleteRecursively();
+    }
+
+    // The chime plays even while the metronome is stopped and muted, then stops.
+    {
+        MetronomeProcessor metronome;
+        metronome.prepareToPlay (48000.0, 512);
+        metronome.clicksMuted = true;
+        metronome.requestChime();
+        const auto first = render (metronome, 48000.0, 0.5, 0.5);
+        const auto later = render (metronome, 48000.0, 3.0, 0.5);
+        const auto peak = first.getMagnitude (0, 0, first.getNumSamples());
+        check (peak > 0.05f && peak < 0.5f, "chime is audible but soft: peak " + juce::String (peak, 3));
+        check (later.getMagnitude (0, 0, later.getNumSamples()) == 0.0f, "chime has ended after 3 s");
+    }
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2253,6 +2414,7 @@ int main()
     testTunings();
     testLibrary();
     testPracticeLog();
+    testPracticePlanner();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

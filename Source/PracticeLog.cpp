@@ -286,6 +286,56 @@ double PracticeLog::playedBetween (juce::Time from, juce::Time to) const
     return total;
 }
 
+std::vector<const PracticeEntry*> PracticeLog::historyFor (const juce::String& topicId) const
+{
+    std::vector<const PracticeEntry*> result;
+
+    for (auto& e : entries)
+        if (e.topicId == topicId)
+            result.push_back (&e);
+
+    return result;
+}
+
+juce::Time PracticeLog::startOfWeek (juce::Time t)
+{
+    const auto daysSinceMonday = (t.getDayOfWeek() + 6) % 7;   // getDayOfWeek: 0 = Sunday
+    const auto day = startOfDay (t);
+    // Step back by calendar days (not 24 h blocks) so a daylight-saving change can't shift midnight.
+    return juce::Time (day.getYear(), day.getMonth(), day.getDayOfMonth() - daysSinceMonday, 0, 0, 0, 0, true);
+}
+
+std::vector<double> PracticeLog::weeklySeconds (const juce::String& topicId, juce::Time now, int weeks) const
+{
+    std::vector<double> result ((size_t) juce::jmax (0, weeks), 0.0);
+
+    if (weeks <= 0)
+        return result;
+
+    const auto thisWeek = startOfWeek (now);
+    std::vector<juce::Time> starts ((size_t) weeks);
+
+    for (int i = 0; i < weeks; ++i)
+        starts[(size_t) i] = juce::Time (thisWeek.getYear(), thisWeek.getMonth(), thisWeek.getDayOfMonth() - 7 * (weeks - 1 - i), 0, 0, 0, 0, true);
+
+    for (auto& e : entries)
+    {
+        if (e.topicId != topicId || e.start < starts.front())
+            continue;
+
+        for (int i = weeks - 1; i >= 0; --i)
+        {
+            if (e.start >= starts[(size_t) i])
+            {
+                result[(size_t) i] += e.playedSeconds;
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
 juce::String PracticeLog::getThisDeviceId()
 {
     const auto file = getAppDataFolder().getChildFile ("device.xml");
