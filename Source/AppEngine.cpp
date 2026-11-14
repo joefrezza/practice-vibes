@@ -35,6 +35,22 @@ AppEngine::AppEngine()
     startTimerHz (2);
     catalogue = std::make_unique<PluginCatalogue> (formatManager);
     midi = std::make_unique<MidiMonitor> (deviceManager);
+
+    footswitch = std::make_unique<Footswitch>();
+
+    if (auto xml = juce::parseXML (getFootswitchFile()))
+        footswitch->fromXml (*xml);
+
+    footswitch->onChange = [this] { footswitch->toXml()->writeTo (getFootswitchFile()); };
+    footswitch->perform = [this] (FootswitchAction action) { performFootswitchAction (action); };
+
+    midi->onMessage = [this] (const juce::MidiMessage& message, const juce::String& source)
+    {
+        footswitch->handleMidi (message);
+
+        if (onMidiMessage)
+            onMidiMessage (message, source);
+    };
 }
 
 AppEngine::~AppEngine()
@@ -43,6 +59,7 @@ AppEngine::~AppEngine()
     alive.reset();
     deviceManager.removeChangeListener (this);
     midi.reset();
+    footswitch.reset();
     catalogue.reset();
     player = nullptr;
     metronome = nullptr;
@@ -170,6 +187,43 @@ void AppEngine::beginBlock (juce::int64 blockStart, int numSamples)
     metronome->advanceClock (blockStart, numSamples);
     playHead.update (*metronome, blockStart);
     looper->beginBlock (blockStart, numSamples);
+}
+
+void AppEngine::performFootswitchAction (FootswitchAction action)
+{
+    using Kind = FootswitchAction::Kind;
+
+    switch (action.kind)
+    {
+        case Kind::trackPress: looper->pressTrack (action.track); break;
+        case Kind::trackClear: looper->clearTrack (action.track); break;
+        case Kind::trackMute:  looper->toggleMute (action.track); break;
+        case Kind::undo:       looper->undo(); break;
+        case Kind::muteAll:    looper->toggleMuteAll(); break;
+        case Kind::clearAll:   looper->clearAll(); break;
+
+        case Kind::metronome:
+            if (metronome->isRunning())
+                metronome->stop();
+            else
+                metronome->start();
+            break;
+
+        case Kind::bypass:
+        {
+            auto index = getBypassTarget ? getBypassTarget() : -1;
+
+            if (! juce::isPositiveAndBelow (index, chain->getNumPlugins()))
+                index = chain->getNumPlugins() > 0 ? 0 : -1;
+
+            if (index >= 0)
+                chain->setBypassed (index, ! chain->isBypassed (index));
+            break;
+        }
+
+        case Kind::none:
+            break;
+    }
 }
 
 void AppEngine::timerCallback()

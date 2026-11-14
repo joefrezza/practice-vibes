@@ -55,6 +55,7 @@ public:
     void clearTrack (int track);
     void clearAll();
     void undo();
+    void toggleMuteAll();               // mutes every playing track, or unmutes them all if all are muted
     void setTrackGain (int track, float gain);
 
     // Status (any thread)

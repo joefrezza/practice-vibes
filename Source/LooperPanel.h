@@ -47,7 +47,8 @@ private:
     juce::ComboBox lengthBox, beatsBox;
     juce::Slider tempoSlider, offsetSlider;
     juce::TextButton metronomeButton { "Start metronome" }, undoButton { "Undo overdub" },
-                     muteAllButton { "Mute all" }, clearAllButton { "Clear all" };
+                     muteAllButton { "Mute all" }, clearAllButton { "Clear all" },
+                     footswitchButton { "Footswitch..." };
     std::unique_ptr<BeatDots> beatDots;
 
     // Drum machine (an instrument plugin following the bar clock)

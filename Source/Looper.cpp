@@ -131,6 +131,18 @@ void Looper::clearTrack (int track)  { push ({ Command::Type::clear, track }); }
 void Looper::clearAll()              { push ({ Command::Type::clearAll, 0 }); }
 void Looper::undo()                  { push ({ Command::Type::undo, 0 }); }
 
+void Looper::toggleMuteAll()
+{
+    bool anyPlaying = false;
+
+    for (int t = 0; t < numTracks; ++t)
+        anyPlaying = anyPlaying || (getState (t) == State::playing && ! isMuted (t));
+
+    for (int t = 0; t < numTracks; ++t)
+        if (getState (t) == State::playing && isMuted (t) != anyPlaying)
+            toggleMute (t);
+}
+
 void Looper::setTrackGain (int track, float gain)
 {
     if (juce::isPositiveAndBelow (track, numTracks))

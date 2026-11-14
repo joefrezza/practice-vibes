@@ -1,4 +1,5 @@
 #include "RigPanel.h"
+#include "FootswitchPanel.h"
 #include "Theme.h"
 
 namespace pv
@@ -67,41 +68,6 @@ private:
 };
 
 //==============================================================================
-RigPanel::MidiTrigger RigPanel::MidiTrigger::fromMessage (const juce::MidiMessage& m)
-{
-    MidiTrigger t;
-
-    if (m.isController() && m.getControllerValue() >= 64)
-        t = { Type::controller, m.getChannel(), m.getControllerNumber() };
-    else if (m.isNoteOn())
-        t = { Type::note, m.getChannel(), m.getNoteNumber() };
-    else if (m.isProgramChange())
-        t = { Type::program, m.getChannel(), m.getProgramChangeNumber() };
-
-    return t;
-}
-
-bool RigPanel::MidiTrigger::matches (const juce::MidiMessage& m) const
-{
-    const auto other = fromMessage (m);
-    return type != Type::none && other.type == type && other.channel == channel && other.number == number;
-}
-
-juce::String RigPanel::MidiTrigger::describe() const
-{
-    const auto ch = " (ch " + juce::String (channel) + ")";
-
-    switch (type)
-    {
-        case Type::controller: return "CC " + juce::String (number) + ch;
-        case Type::note:       return "Note " + juce::MidiMessage::getMidiNoteName (number, true, true, 3) + ch;
-        case Type::program:    return "Program " + juce::String (number) + ch;
-        case Type::none:       break;
-    }
-
-    return "none";
-}
-
 //==============================================================================
 RigPanel::RigPanel (AppEngine& e)
     : engine (e)
@@ -119,7 +85,7 @@ RigPanel::RigPanel (AppEngine& e)
     setupHeader (levelsHeader, "Input / output");
     setupHeader (midiHeader, "MIDI footswitch");
 
-    for (auto* b : { &addButton, &scanButton, &editButton, &bypassButton, &upButton, &downButton, &removeButton, &learnButton })
+    for (auto* b : { &addButton, &scanButton, &editButton, &bypassButton, &upButton, &downButton, &removeButton, &footswitchButton })
         addAndMakeVisible (*b);
 
     // Catalogue ------------------------------------------------------------
@@ -243,13 +209,15 @@ RigPanel::RigPanel (AppEngine& e)
     lastMidiLabel.setMinimumHorizontalScale (0.6f);
     addAndMakeVisible (lastMidiLabel);
 
-    learnButton.onClick = [this]
+    footswitchButton.setTooltip ("Learn the pedal's switches and choose what they do (looper, metronome, bypass).");
+    footswitchButton.onClick = [this]
     {
-        learning = true;
-        learnButton.setButtonText ("Press a footswitch now...");
+        if (showOverlay)
+            showOverlay ("Footswitch", std::make_unique<FootswitchPanel> (engine));
     };
 
-    engine.midi->onMessage = [this] (const juce::MidiMessage& m, const juce::String& source) { handleMidi (m, source); };
+    engine.onMidiMessage = [this] (const juce::MidiMessage& m, const juce::String& source) { handleMidi (m, source); };
+    engine.getBypassTarget = [this] { return selectedChainIndex(); };
     engine.midi->onDevicesChanged = [this] { refreshMidiDevices(); };
 
     engine.catalogue->addChangeListener (this);
@@ -271,7 +239,8 @@ RigPanel::~RigPanel()
     engine.deviceManager.removeChangeListener (this);
 
     engine.chain->onChange = nullptr;
-    engine.midi->onMessage = nullptr;
+    engine.onMidiMessage = nullptr;
+    engine.getBypassTarget = nullptr;
     engine.midi->onDevicesChanged = nullptr;
 
     catalogueList.setModel (nullptr);
@@ -344,7 +313,7 @@ void RigPanel::resized()
     midiHeader.setBounds (take (30));
     midiDevicesLabel.setBounds (take (30));
     lastMidiLabel.setBounds (take (36));
-    learnButton.setBounds (take (48).reduced (0, 4));
+    footswitchButton.setBounds (take (48).reduced (0, 4));
 }
 
 //==============================================================================
@@ -419,32 +388,6 @@ void RigPanel::handleMidi (const juce::MidiMessage& message, const juce::String&
 {
     lastMidiLabel.setText (message.getDescription(), juce::dontSendNotification);
     juce::Logger::writeToLog ("MIDI [" + source + "] " + message.getDescription());
-
-    if (learning)
-    {
-        const auto trigger = MidiTrigger::fromMessage (message);
-
-        if (trigger.type != MidiTrigger::Type::none)
-        {
-            bypassTrigger = trigger;
-            learning = false;
-            learnButton.setButtonText ("Footswitch = " + trigger.describe() + "  (tap to re-learn)");
-            juce::Logger::writeToLog ("Learned bypass footswitch: " + trigger.describe());
-        }
-
-        return;
-    }
-
-    if (bypassTrigger.matches (message))
-    {
-        auto index = selectedChainIndex();
-
-        if (index < 0 && engine.chain->getNumPlugins() > 0)
-            index = 0;
-
-        if (index >= 0)
-            engine.chain->setBypassed (index, ! engine.chain->isBypassed (index));
-    }
 }
 
 //==============================================================================

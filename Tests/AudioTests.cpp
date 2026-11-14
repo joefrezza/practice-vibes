@@ -3,6 +3,7 @@
 
 #include "../Source/BarClockPlayHead.h"
 #include "../Source/ChordAnalyzer.h"
+#include "../Source/Footswitch.h"
 #include "../Source/Looper.h"
 #include "../Source/MetronomeProcessor.h"
 #include "../Source/PlayerProcessor.h"
@@ -983,6 +984,102 @@ namespace
                 check (std::abs (metronome.getCurrentBpm() - 120.0 * c.speed) < 1.0, "shown tempo follows speed: " + juce::String (metronome.getCurrentBpm(), 1));
         }
     }
+    void testFootswitch()
+    {
+        std::cout << "Footswitch" << std::endl;
+        using Kind = FootswitchAction::Kind;
+
+        auto cc = [] (int number, int value) { return juce::MidiMessage::controllerEvent (1, number, value); };
+
+        struct Rig
+        {
+            Footswitch fs;
+            std::vector<juce::String> fired;
+            Rig() { fs.perform = [this] (FootswitchAction a) { fired.push_back (a.toString()); }; }
+        };
+
+        // Momentary CC: learned from press + quick release; tap on press, hold after 1 s, once.
+        {
+            Rig r;
+            r.fs.startLearning (0);
+            check (r.fs.handleMidi (cc (20, 127), 10.0), "learning takes the first message");
+            check (r.fs.getPendingIndex() == 0, "CC switch: waiting to see a release");
+            r.fs.handleMidi (cc (20, 0), 10.15);
+            check (r.fs.getPendingIndex() < 0 && r.fs.getSwitch (0).momentary, "quick release = momentary");
+            check (r.fired.empty(), "learning fires no action");
+
+            r.fs.handleMidi (cc (20, 127), 20.0);
+            check (r.fired.size() == 1 && r.fired[0] == "press:0", "tap fires track 1 on the press");
+            r.fs.update (20.5);
+            check (r.fired.size() == 1, "no hold after 0.5 s");
+            r.fs.update (21.05);
+            r.fs.update (21.5);
+            check (r.fired.size() == 2 && r.fired[1] == "clear:0", "hold clears track 1 once after 1 s");
+            r.fs.handleMidi (cc (20, 0), 22.0);
+            r.fs.handleMidi (cc (20, 127), 23.0);
+            r.fs.handleMidi (cc (20, 0), 23.2);
+            r.fs.update (24.5);
+            check (r.fired.size() == 3 && r.fired[2] == "press:0", "short tap: no hold");
+            check (! r.fs.handleMidi (cc (21, 127), 25.0) && r.fired.size() == 3, "unlearned CC is ignored");
+        }
+
+        // Latching CC: no release within the window -> every message (127 or 0) is a tap, no holds.
+        {
+            Rig r;
+            r.fs.startLearning (1);
+            r.fs.handleMidi (cc (30, 127), 10.0);
+            r.fs.update (11.0);
+            check (r.fs.getPendingIndex() == 1, "still checking after 1 s");
+            r.fs.update (13.1);
+            check (r.fs.getPendingIndex() < 0 && ! r.fs.getSwitch (1).momentary, "no release = latching");
+            r.fs.handleMidi (cc (30, 0), 20.0);
+            r.fs.handleMidi (cc (30, 127), 21.0);
+            r.fs.update (23.0);
+            check (r.fired.size() == 2 && r.fired[0] == "press:1" && r.fired[1] == "press:1", "latching: each stomp taps, no hold");
+        }
+
+        // A latching switch that was "on" starts with 0: latching at once.
+        {
+            Rig r;
+            r.fs.startLearning (2);
+            r.fs.handleMidi (cc (40, 0), 10.0);
+            check (r.fs.getPendingIndex() < 0 && ! r.fs.getSwitch (2).momentary, "first value 0 = latching");
+        }
+
+        // Notes are momentary; program changes tap. Learning a used message moves it.
+        {
+            Rig r;
+            r.fs.startLearning (0);
+            r.fs.handleMidi (juce::MidiMessage::noteOn (2, 60, (juce::uint8) 100), 1.0);
+            check (r.fs.getSwitch (0).momentary && r.fs.getSwitch (0).trigger.type == MidiTrigger::Type::note, "note switch is momentary");
+            r.fs.startLearning (3);
+            r.fs.handleMidi (juce::MidiMessage::programChange (1, 5), 2.0);
+            r.fs.setTapAction (3, { Kind::undo, 0 });
+            r.fs.handleMidi (juce::MidiMessage::programChange (1, 5), 3.0);
+            check (r.fired.size() == 1 && r.fired[0] == "undo", "program change taps the chosen action");
+
+            r.fs.startLearning (1);
+            r.fs.handleMidi (juce::MidiMessage::noteOn (2, 60, (juce::uint8) 100), 4.0);
+            check (! r.fs.getSwitch (0).trigger.isValid() && r.fs.getSwitch (1).trigger.type == MidiTrigger::Type::note,
+                   "re-learning a message moves it to the new switch");
+        }
+
+        // Settings round trip
+        {
+            Footswitch a;
+            a.startLearning (2);
+            a.handleMidi (cc (64, 0), 1.0);
+            a.setHoldAction (2, { Kind::metronome, 0 });
+            a.setTapAction (1, { Kind::trackMute, 3 });
+
+            Footswitch b;
+            b.fromXml (*a.toXml());
+            check (b.getSwitch (2).trigger == a.getSwitch (2).trigger && ! b.getSwitch (2).momentary
+                       && b.getSwitch (2).hold.kind == Kind::metronome && b.getSwitch (1).tap.toString() == "mute:3"
+                       && b.getSwitch (0).tap.toString() == "press:0" && b.getSwitch (0).hold.toString() == "clear:0",
+                   "settings survive a save / load");
+        }
+    }
 }
 
 int main()
@@ -998,6 +1095,7 @@ int main()
     testFollowSong();
     testLooper();
     testPlayHead();
+    testFootswitch();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

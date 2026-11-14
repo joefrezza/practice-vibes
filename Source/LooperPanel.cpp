@@ -1,4 +1,5 @@
 #include "LooperPanel.h"
+#include "FootswitchPanel.h"
 #include "AppPaths.h"
 #include "Theme.h"
 
@@ -261,19 +262,16 @@ LooperPanel::LooperPanel (AppEngine& e)
 
     undoButton.onClick = [this] { looper.undo(); };
     clearAllButton.onClick = [this] { looper.clearAll(); };
-    muteAllButton.onClick = [this]
+    muteAllButton.onClick = [this] { looper.toggleMuteAll(); };
+
+    footswitchButton.setTooltip ("Control the looper with a MIDI pedal: learn its switches, choose tap and hold actions.");
+    footswitchButton.onClick = [this]
     {
-        bool anyPlaying = false;
-
-        for (int t = 0; t < Looper::numTracks; ++t)
-            anyPlaying = anyPlaying || (looper.getState (t) == Looper::State::playing && ! looper.isMuted (t));
-
-        for (int t = 0; t < Looper::numTracks; ++t)
-            if (looper.getState (t) == Looper::State::playing && looper.isMuted (t) != anyPlaying)
-                looper.toggleMute (t);
+        if (showOverlay)
+            showOverlay ("Footswitch", std::make_unique<FootswitchPanel> (engine));
     };
 
-    for (auto* b : { &undoButton, &clearAllButton, &muteAllButton, &metronomeButton })
+    for (auto* b : { &undoButton, &clearAllButton, &muteAllButton, &metronomeButton, &footswitchButton })
         addAndMakeVisible (*b);
 
     // Metronome (shared with the Practice tab)
@@ -638,6 +636,7 @@ void LooperPanel::resized()
     top.removeFromLeft (16);
     lengthLabel.setBounds (top.removeFromLeft (60));
     lengthBox.setBounds (top.removeFromLeft (220).reduced (2, 6));
+    footswitchButton.setBounds (top.removeFromRight (120).reduced (3, 4));
     clearAllButton.setBounds (top.removeFromRight (100).reduced (3, 4));
     muteAllButton.setBounds (top.removeFromRight (100).reduced (3, 4));
     undoButton.setBounds (top.removeFromRight (130).reduced (3, 4));

@@ -2,6 +2,7 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "BarClockPlayHead.h"
+#include "Footswitch.h"
 #include "Looper.h"
 #include "MetronomeProcessor.h"
 #include "MidiMonitor.h"
@@ -46,10 +47,16 @@ public:
     // Uses the metronome; its two audio nodes live in the chain's graph.
     std::unique_ptr<Looper> looper;
 
+    // MIDI pedal board: every incoming message goes to the footswitch first, then to onMidiMessage.
+    std::unique_ptr<Footswitch> footswitch;
+    std::function<void (const juce::MidiMessage&, const juce::String& sourceName)> onMidiMessage;   // UI (message display)
+    std::function<int()> getBypassTarget;       // chain index the "bypass" footswitch action toggles (default: first plugin)
+
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void beginBlock (juce::int64 blockStart, int numSamples) override;
     void timerCallback() override;      // keeps the looper's latency compensation current
+    void performFootswitchAction (FootswitchAction);
 
     /** Name of the system default output for the current device type ("" if unknown). */
     juce::String getSystemDefaultOutputName() const;

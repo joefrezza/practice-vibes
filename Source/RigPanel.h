@@ -26,18 +26,6 @@ private:
     class ListModel;
     class LevelMeter;
 
-    struct MidiTrigger
-    {
-        enum class Type { none, controller, note, program };
-        Type type = Type::none;
-        int channel = 0;
-        int number = 0;
-
-        static MidiTrigger fromMessage (const juce::MidiMessage&);
-        bool matches (const juce::MidiMessage&) const;
-        juce::String describe() const;
-    };
-
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
 
@@ -72,9 +60,7 @@ private:
     juce::ToggleButton monitorButton { "Monitor guitar (use headphones!)" };
 
     juce::Label midiDevicesLabel, lastMidiLabel;
-    juce::TextButton learnButton { "Learn footswitch: toggle bypass" };
-    MidiTrigger bypassTrigger;
-    bool learning = false;
+    juce::TextButton footswitchButton { "Footswitch setup..." };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RigPanel)
 };
