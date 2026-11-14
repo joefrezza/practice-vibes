@@ -1,10 +1,13 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "LatencyCalibrator.h"
 #include "MetronomeProcessor.h"
 
 namespace pv
 {
+
+struct LoopSet;
 
 /** A 4-track looper locked to the metronome's bar grid.
 
@@ -48,15 +51,29 @@ public:
     std::atomic<int> deviceLatencySamples { 0 };          // device input + output latency
     std::atomic<int> chainLatencySamples { 0 };           // plugin latency
 
+    /** Measures the round trip on the dry input while active (see LatencyCalibrator). */
+    LatencyCalibrator calibrator;
+
     //==============================================================================
     // Commands (message thread)
-    void pressTrack (int track);        // the pedal button
+    /** The pedal button. `pressSeconds` (Time::getMillisecondCounterHiRes() / 1000, e.g. a MIDI
+        timestamp) dates the press, so the time it took to reach the audio thread doesn't count;
+        0 = now. */
+    void pressTrack (int track, double pressSeconds = 0.0);
     void toggleMute (int track);
     void clearTrack (int track);
     void clearAll();
     void undo();
     void toggleMuteAll();               // mutes every playing track, or unmutes them all if all are muted
     void setTrackGain (int track, float gain);
+
+    /** Copies the loops, each rotated to start on the same bar line (so they stay aligned in a
+        DAW and when loaded again). Fails while a track records or overdubs. Blocks briefly. */
+    bool copyLoops (LoopSet&, juce::String& error);
+
+    /** Loads loops into the (empty) looper: sets the metronome to the set's tempo and meter and
+        (re)starts it; the loops play from its first downbeat. */
+    bool loadLoops (const LoopSet&, juce::String& error);
 
     // Status (any thread)
     State getState (int track) const noexcept      { return (State) status[(size_t) track].state.load(); }
@@ -66,6 +83,7 @@ public:
     float getGain (int track) const noexcept       { return status[(size_t) track].gain.load(); }
     float takePeak (int track) noexcept            { return status[(size_t) track].peak.exchange (0.0f); }
     bool isEmpty() const noexcept                  { return emptyFlag.load(); }
+    bool isLoading() const noexcept                { return loadPendingFlag.load(); }   // loaded loops wait for the metronome
     bool canUndo() const noexcept                  { return undoAvailable.load(); }
     Source getActiveSource() const noexcept        { return (Source) activeSource.load(); }
     int getCompensationSamples() const noexcept    { return compensation.load(); }
@@ -91,9 +109,10 @@ public:
 private:
     struct Command
     {
-        enum class Type { press, mute, clear, clearAll, undo } type = Type::press;
+        enum class Type { press, mute, clear, clearAll, undo, load } type = Type::press;
         int track = 0;
         bool countIn = false;
+        double pressSeconds = 0.0;      // wall-clock time of the press, 0 = when handled
     };
 
     struct Status
@@ -135,6 +154,8 @@ private:
     };
 
     void push (Command);
+    bool handleFreeze();
+    void resolveLoad();
     void handle (const Command&);
     void press (int track, bool countIn);
     void finishActive (int exceptTrack);
@@ -154,6 +175,8 @@ private:
     void backfillFromHistory (Track&, const juce::AudioBuffer<float>& history);
     void play (Track&, Status&, float* left, float* right, int numSamples);
     double musicalNow() const noexcept             { return (double) (now - comp); }
+    double musicalTimeOf (double pressSeconds) const noexcept;
+    void backfillLayer (Track&, double from, double to, float sign);
     int maxTrackSamples() const noexcept;
     static void writeHistory (juce::AudioBuffer<float>&, int channel, const float*, juce::int64 graphStart, int numSamples);
 
@@ -179,15 +202,53 @@ private:
 
     juce::int64 now = 0;    // graph time of the current block's first sample
     int blockLength = 0;
+    double blockWallSeconds = 0.0;  // wall clock when this block started (maps press times to graph time)
+    double eventTime = 0.0;         // musical time of the command being handled (a dated press may be in the past)
     int comp = 0;           // latency compensation, samples
 
     juce::AudioBuffer<float> dryHistory, wetHistory;   // the last ~1.5 s of input, indexed by graph time
     juce::AudioBuffer<float> mixBuffer;
 
-    std::atomic<bool> emptyFlag { true }, undoAvailable { false };
+    // Copying loops: the message thread asks, the audio thread stops changing the buffers and answers.
+    struct FrozenTrack { State state = State::empty; double origin = 0.0, period = 0.0; int bars = 0; bool muted = false; };
+    struct Frozen { double anchor = 0.0, barSamples = 0.0; int beats = 4, source = 0; std::array<FrozenTrack, numTracks> tracks; };
+    std::atomic<int> freezeRequest { 0 }, freezeAck { 0 };
+    int freezeCounter = 0, handledFreeze = 0;
+    bool frozenNow = false;
+    Frozen frozen;
+
+    // Loading loops: buffers are filled on the message thread while the tracks are empty;
+    // the audio thread starts them on the metronome's next start.
+    struct PendingLoad { std::array<int, numTracks> bars {}; std::array<bool, numTracks> muted {}; int source = 0; };
+    PendingLoad pendingLoad;
+    bool loadWaiting = false;
+    juce::int64 loadRequestedAt = 0;
+
+    std::atomic<bool> emptyFlag { true }, undoAvailable { false }, loadPendingFlag { false };
     std::atomic<int> activeSource { (int) Source::afterFx }, compensation { 0 }, currentBar { -1 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Looper)
+};
+
+//==============================================================================
+/** A copy of the looper's loops (see Looper::copyLoops / loadLoops, LoopFiles). */
+struct LoopSet
+{
+    struct Loop
+    {
+        juce::AudioBuffer<float> audio;     // starts on a bar line shared by all loops; 1 channel = before FX
+        int bars = 0;                       // 0 = unused track
+        bool muted = false;
+        float gain = 1.0f;
+    };
+
+    double sampleRate = 48000.0, barSamples = 0.0;
+    int beatsPerBar = 4;
+    Looper::Source source = Looper::Source::afterFx;
+    std::array<Loop, Looper::numTracks> loops;
+
+    double getBpm() const       { return barSamples > 0.0 ? 60.0 * sampleRate * beatsPerBar / barSamples : 0.0; }
+    int getNumLoops() const     { int n = 0; for (auto& l : loops) n += l.bars > 0 ? 1 : 0; return n; }
 };
 
 } // namespace pv

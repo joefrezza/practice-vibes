@@ -50,7 +50,12 @@ double MetronomeProcessor::followTickTime (const ChordTrack& grid, int beat, int
     const auto n = (int) b.size();
     const auto start = beat < n ? b[(size_t) beat] : b[(size_t) n - 1] + (beat - n + 1) * (b[(size_t) n - 1] - b[(size_t) n - 2]);
     const auto next = beat + 1 < n ? b[(size_t) beat + 1] : start + (b[(size_t) n - 1] - b[(size_t) n - 2]);
-    return start + (next - start) * tick / ticks;
+    return start + (next - start) * tickFraction (tick, ticks, tickSwing());
+}
+
+double MetronomeProcessor::tickSwing() const noexcept
+{
+    return canSwing ((Subdivision) subdivision.load()) ? juce::jlimit (0.5, 0.75, swing.load()) : 0.5;
 }
 
 //==============================================================================
@@ -203,13 +208,18 @@ void MetronomeProcessor::advanceClock (juce::int64 blockStart, int numSamples)
 
     const auto start = (double) blockStart;
     const auto ticks = ticksPerBeat ((Subdivision) subdivision.load());
+    const auto swingNow = tickSwing();
 
     // Puts the next tick at or after `time` (the bar start and tempo being set).
-    auto placeNextTick = [this, ticks] (double time)
+    auto placeNextTick = [this, ticks, swingNow] (double time)
     {
         const auto position = juce::jmax (0.0, (time - barStart) / beatSamples);
         nextBeat = (int) std::floor (position);
-        nextTick = (int) std::ceil ((position - nextBeat) * ticks - 1.0e-9);
+        nextTick = 0;
+        const auto within = (position - nextBeat) * beatSamples;   // samples into the beat
+
+        while (nextTick < ticks && tickFraction (nextTick, ticks, swingNow) * beatSamples < within - 1.0e-6)
+            ++nextTick;
 
         if (nextTick >= ticks)
         {
@@ -224,6 +234,7 @@ void MetronomeProcessor::advanceClock (juce::int64 blockStart, int numSamples)
         barsSinceStep = 0;
         secondsSinceStep = 0.0;
         lastTicks = ticks;
+        lastSwing = swingNow;
 
         if (gridLocked)
         {
@@ -271,11 +282,12 @@ void MetronomeProcessor::advanceClock (juce::int64 blockStart, int numSamples)
         secondsSinceStep = 0.0;
     }
 
-    if (ticks != lastTicks)
+    if (ticks != lastTicks || swingNow != lastSwing)
     {
-        // The subdivision changed: the next tick moves to the new subdivision grid.
-        const auto position = nextBeat + (double) nextTick / lastTicks;
+        // The subdivision or swing changed: the next tick moves to the new grid.
+        const auto position = nextBeat + tickFraction (nextTick, lastTicks, lastSwing);
         lastTicks = ticks;
+        lastSwing = swingNow;
         placeNextTick (barStart + position * beatSamples);
     }
 
@@ -299,7 +311,7 @@ void MetronomeProcessor::advanceClock (juce::int64 blockStart, int numSamples)
             continue;
         }
 
-        const auto t = barStart + (nextBeat + (double) nextTick / ticks) * beatSamples;
+        const auto t = barStart + (nextBeat + tickFraction (nextTick, ticks, swingNow)) * beatSamples;
         const auto sample = (juce::int64) std::ceil (t - 1.0e-9);
 
         if (sample >= blockEnd)

@@ -65,8 +65,9 @@ private:
     juce::Slider bpmSlider, clickVolumeSlider;
     juce::Label bpmLabel, beatsLabel, clickVolumeLabel;
     juce::ComboBox beatsBox, subdivisionBox, soundBox;
-    juce::Label subdivisionLabel, soundLabel, subLevelLabel;
-    juce::Slider subLevelSlider;
+    juce::Label subdivisionLabel, soundLabel, subLevelLabel, swingLabel;
+    juce::Slider subLevelSlider, swingSlider;
+    void updateSubdivisionControls();
 
     juce::ToggleButton trainerToggle { "Speed trainer" };
     juce::ToggleButton followToggle { "Follow song beats" };

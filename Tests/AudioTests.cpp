@@ -4,11 +4,14 @@
 #include "../Source/BarClockPlayHead.h"
 #include "../Source/ChordAnalyzer.h"
 #include "../Source/Footswitch.h"
+#include "../Source/LatencyCalibrator.h"
+#include "../Source/LoopFiles.h"
 #include "../Source/Looper.h"
 #include "../Source/MetronomeProcessor.h"
 #include "../Source/PlayerProcessor.h"
 
 #include <iostream>
+#include <thread>
 
 using namespace pv;
 
@@ -288,6 +291,48 @@ namespace
             const auto downbeat = peakAround (0.0), beat = peakAround (0.5), sub = peakAround (0.25);
             check (downbeat > beat && beat > sub && sub > 0.01f,
                    "levels downbeat > beat > subdivision: " + juce::String (downbeat, 2) + " / " + juce::String (beat, 2) + " / " + juce::String (sub, 2));
+        }
+
+        {
+            // Swing: the off-beat 8th moves later (0.5 = straight, 0.75 = dotted 8th + 16th)
+            auto firstOnsetAfter = [] (const juce::AudioBuffer<float>& out, double fromSeconds, double rate_)
+            {
+                for (int i = (int) (fromSeconds * rate_); i < out.getNumSamples(); ++i)
+                    if (std::abs (out.getSample (0, i)) > 0.02f)
+                        return i / rate_;
+
+                return -1.0;
+            };
+
+            for (auto [sub, swingAmount, from, expected, name] :
+                 { std::tuple { MetronomeProcessor::Subdivision::eighths, 0.75, 0.1, 0.375, "8ths dotted" },
+                   std::tuple { MetronomeProcessor::Subdivision::eighths, 2.0 / 3.0, 0.1, 1.0 / 3.0, "8ths shuffle" },
+                   std::tuple { MetronomeProcessor::Subdivision::sixteenths, 0.75, 0.05, 0.1875, "16ths dotted" },
+                   std::tuple { MetronomeProcessor::Subdivision::triplets, 0.75, 0.1, 1.0 / 6.0, "triplets ignore swing" } })
+            {
+                MetronomeProcessor metronome;
+                metronome.prepareToPlay (rate, 512);
+                metronome.startBpm = 120.0;
+                metronome.subdivision = (int) sub;
+                metronome.subdivisionLevel = 1.0f;
+                metronome.swing = swingAmount;
+                metronome.start();
+                const auto out = render (metronome, rate, 1.0, 1.0);
+                const auto onset = firstOnsetAfter (out, from, rate);
+                check (std::abs (onset - expected) < 0.001, juce::String ("swing ") + name + ": second tick at "
+                         + juce::String (onset, 4) + " s, expected " + juce::String (expected, 4));
+            }
+
+            // 3 bars of swung 8ths still land the downbeats on time
+            MetronomeProcessor metronome;
+            metronome.prepareToPlay (rate, 512);
+            metronome.startBpm = 120.0;
+            metronome.subdivision = (int) MetronomeProcessor::Subdivision::eighths;
+            metronome.swing = 0.75;
+            metronome.start();
+            const auto out = render (metronome, rate, 6.5, 6.5);
+            const auto onset = firstOnsetAfter (out, 5.9, rate);
+            check (std::abs (onset - 6.0) < 0.001, "swung 8ths keep the bar lines: downbeat 4 at " + juce::String (onset, 4) + " s");
         }
 
         for (auto [snd, name] : { std::pair { MetronomeProcessor::Sound::click, "click" }, std::pair { MetronomeProcessor::Sound::drums, "drums" } })
@@ -736,6 +781,42 @@ namespace
         }
 
         {
+            // A dated press (footswitch MIDI timestamp): the overdub starts and stops at the stomp,
+            // not when the command reaches the audio thread 0.1 s later.
+            LooperRig rig;
+            rig.looper.fixedBars = 1;
+            rig.metronome.start();
+            const auto input = [] (juce::int64 g)
+            {
+                return g < 96000 ? noiseAt (g) : g < 144000 ? 0.0f : noiseAt (g % 96000, 2);
+            };
+            rig.runUntil (0.1, input);
+            rig.looper.pressTrack (0);
+            rig.runUntil (3.1, input);
+
+            // The rig's next block is 480 samples (10 ms): a press 0.11 s ago maps to 3.0 s.
+            const auto wallNow = [] { return juce::Time::getMillisecondCounterHiRes() * 0.001; };
+            rig.looper.pressTrack (0, wallNow() - 0.11);
+            rig.runUntil (5.1, input);
+            rig.looper.pressTrack (0, wallNow() - 0.11);
+            rig.runUntil (8.0, silence);
+
+            float worst = 0.0f;
+
+            for (auto g = (juce::int64) (6.0 * rate); g < (juce::int64) (8.0 * rate); ++g)
+            {
+                const auto position = g % 96000;
+
+                if (std::abs (position - 48000) < 240)
+                    continue;       // the stomp itself: the wall clock is only good to a few ms here
+
+                worst = juce::jmax (worst, std::abs (rig.out[(size_t) g] - (noiseAt (position) + noiseAt (position, 2))));
+            }
+
+            check (worst < 1.0e-5f, "dated overdub covers exactly the stomped cycle (error " + juce::String (worst) + ")");
+        }
+
+        {
             // Second track: 2 bars over a 1-bar loop, started late in a bar; both stay on the grid.
             LooperRig rig;
             rig.looper.fixedBars = 1;
@@ -786,6 +867,123 @@ namespace
 
     /** Metronome following the song's beat grid through the player, at two speeds,
         in both processing orders, and across a loop jump. */
+    /** copyLoops() waits for the audio thread: run it on another thread while the rig plays. */
+    template <typename Input>
+    bool copyWhilePlaying (LooperRig& rig, LoopSet& set, juce::String& error, Input input)
+    {
+        std::atomic<bool> done { false };
+        bool ok = false;
+        std::thread copier ([&] { ok = rig.looper.copyLoops (set, error); done = true; });
+
+        while (! done.load())
+            rig.runUntil ((double) rig.time / LooperRig::rate + 0.01, input);
+
+        copier.join();
+        return ok;
+    }
+
+    void testLoopFiles()
+    {
+        std::cout << "Saving and loading loops" << std::endl;
+        constexpr double rate = LooperRig::rate;
+        constexpr int bar = 96000;      // 120 bpm 4/4
+        const auto input = [] (juce::int64 g) { return g < bar ? noiseAt (g, 1) : noiseAt (g, 2); };
+
+        // Track 1: 1 bar from 0 s. Track 2: 2 bars from the bar line at 2 s.
+        LooperRig rig;
+        rig.looper.fixedBars = 1;
+        rig.metronome.start();
+        rig.runUntil (0.05, input);
+        rig.looper.pressTrack (0);
+        rig.runUntil (2.0, input);
+        rig.looper.fixedBars = 2;
+        rig.looper.pressTrack (1);
+
+        {
+            LoopSet busy;
+            juce::String error;
+            rig.runUntil (3.0, input);
+            const auto copied = copyWhilePlaying (rig, busy, error, input);
+            check (! copied && error.isNotEmpty(), "no copy while recording: \"" + error + "\"");
+        }
+
+        rig.runUntil (8.0, input);
+        rig.looper.setTrackGain (0, 0.5f);
+
+        LoopSet set;
+        juce::String error;
+        check (copyWhilePlaying (rig, set, error, input), "loops copied" + (error.isEmpty() ? juce::String() : ": " + error));
+        check (set.getNumLoops() == 2 && set.loops[0].bars == 1 && set.loops[1].bars == 2 && std::abs (set.getBpm() - 120.0) < 1.0e-6,
+               "copy has 2 loops (1 and 2 bars) at 120 bpm");
+
+        // Both start on the shared bar line (grid time 0): track 2 is rotated by one bar.
+        auto expected0 = [] (int i) { return noiseAt (i % bar, 1); };
+        auto expected1 = [] (int i) { return noiseAt (bar + ((i - bar) % (2 * bar) + 2 * bar) % (2 * bar), 2); };
+        float worst = 0.0f;
+
+        for (int i = 0; i < bar; ++i)
+            worst = juce::jmax (worst, std::abs (set.loops[0].audio.getSample (0, i) - expected0 (i)));
+
+        for (int i = 0; i < 2 * bar; ++i)
+            worst = juce::jmax (worst, std::abs (set.loops[1].audio.getSample (1, i) - expected1 (i)));
+
+        check (set.loops[1].audio.getNumSamples() == 2 * bar && worst < 1.0e-6f,
+               "copied loops are aligned to the shared bar line (error " + juce::String (worst) + ")");
+
+        // The mix: 2 bars (least common multiple), track 1 at half volume.
+        const auto mix = LoopFiles::renderMix (set);
+        worst = 0.0f;
+
+        for (int i = 0; i < mix.getNumSamples(); ++i)
+            worst = juce::jmax (worst, std::abs (mix.getSample (0, i) - (0.5f * expected0 (i) + expected1 (i))));
+
+        check (mix.getNumSamples() == 2 * bar && worst < 1.0e-5f, "mix: 2 bars, volumes applied (error " + juce::String (worst) + ")");
+
+        // Save and load again: identical audio and settings.
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("pv-loops-test");
+        folder.deleteRecursively();
+        const auto saved = LoopFiles::save (set, folder);
+        check (saved.wasOk() && folder.getChildFile ("mix.wav").existsAsFile() && folder.getChildFile ("track 2.wav").existsAsFile(),
+               "session saved" + (saved.wasOk() ? juce::String() : ": " + saved.getErrorMessage()));
+
+        LoopSet loaded;
+        const auto read = LoopFiles::load (folder, loaded);
+        bool same = read.wasOk() && loaded.getNumLoops() == 2 && std::abs (loaded.barSamples - set.barSamples) < 1.0e-6
+                    && loaded.beatsPerBar == 4 && std::abs (loaded.loops[0].gain - 0.5f) < 1.0e-6f;
+
+        for (int t = 0; t < 2 && same; ++t)
+            for (int c = 0; c < 2 && same; ++c)
+                for (int i = 0; i < set.loops[(size_t) t].audio.getNumSamples() && same; ++i)
+                    same = loaded.loops[(size_t) t].audio.getSample (c, i) == set.loops[(size_t) t].audio.getSample (c, i);
+
+        check (same, "loaded session is identical" + (read.wasOk() ? juce::String() : ": " + read.getErrorMessage()));
+        folder.deleteRecursively();
+
+        // Load into a fresh looper: tempo set, loops start on the metronome's first downbeat.
+        LooperRig fresh;
+        fresh.metronome.startBpm = 90.0;
+        fresh.metronome.beatsPerBar = 3;
+        check (fresh.looper.loadLoops (loaded, error), "loaded into the looper" + (error.isEmpty() ? juce::String() : ": " + error));
+        fresh.runUntil (10.0, [] (juce::int64) { return 0.0f; });
+        const auto start = fresh.metronome.getClockStartTime();
+        check (fresh.looper.getState (0) == Looper::State::playing && fresh.looper.getState (1) == Looper::State::playing
+                 && std::abs (fresh.metronome.getCurrentBpm() - 120.0) < 1.0e-6 && fresh.metronome.getClockBeatsPerBar() == 4,
+               "both tracks play at the saved tempo and meter");
+
+        worst = 0.0f;
+
+        for (auto g = (juce::int64) start; g < (juce::int64) (10.0 * rate); ++g)
+        {
+            const auto i = (int) (g - (juce::int64) start);
+            worst = juce::jmax (worst, std::abs (fresh.out[(size_t) g] - (0.5f * expected0 (i) + expected1 (i))));
+        }
+
+        check (start > 0.0 && worst < 1.0e-5f, "loaded loops play in time from the downbeat (error " + juce::String (worst) + ")");
+
+        LoopSet again;
+        check (! fresh.looper.loadLoops (loaded, error), "loading into a looper with loops is refused");
+    }
+
     void testPlayHead()
     {
         std::cout << "Play head (bar clock -> plugins)" << std::endl;
@@ -995,7 +1193,7 @@ namespace
         {
             Footswitch fs;
             std::vector<juce::String> fired;
-            Rig() { fs.perform = [this] (FootswitchAction a) { fired.push_back (a.toString()); }; }
+            Rig() { fs.perform = [this] (FootswitchAction a, double) { fired.push_back (a.toString()); }; }
         };
 
         // Momentary CC: learned from press + quick release; tap on press, hold after 1 s, once.
@@ -1080,6 +1278,76 @@ namespace
                    "settings survive a save / load");
         }
     }
+
+    void testLatencyCalibration()
+    {
+        std::cout << "Latency calibration" << std::endl;
+        constexpr double rate = 48000.0;
+        const double beat = rate * 60.0 / 100.0;     // 100 bpm
+
+        // Muted strums (short noise bursts) on every beat, `lagMs` late with some jitter, over hum and noise.
+        auto run = [&] (double lagMs, double jitterMs, int beats, double barStart, std::vector<int> skippedBeats = {})
+        {
+            juce::Random random (42);
+            const auto length = (int) ((beats + 1) * beat);
+            std::vector<float> input ((size_t) length);
+
+            for (int i = 0; i < length; ++i)
+                input[(size_t) i] = 0.003f * (random.nextFloat() * 2.0f - 1.0f)
+                                    + 0.004f * (float) std::sin (juce::MathConstants<double>::twoPi * 50.0 * i / rate);
+
+            for (int b = 1; b <= beats; ++b)
+            {
+                if (std::find (skippedBeats.begin(), skippedBeats.end(), b) != skippedBeats.end())
+                    continue;
+
+                const auto onset = (int) (barStart + b * beat + (lagMs + jitterMs * (random.nextFloat() * 2.0f - 1.0f)) * rate / 1000.0);
+
+                for (int i = 0; i < (int) (0.08 * rate) && onset + i < length; ++i)
+                    input[(size_t) (onset + i)] += 0.3f * std::exp (-i / (0.015f * (float) rate)) * (random.nextFloat() * 2.0f - 1.0f);
+            }
+
+            LatencyCalibrator calibrator;
+            calibrator.prepare (rate);
+            calibrator.start();
+
+            for (int done = 0; done < length; done += 256)
+                calibrator.process (input.data() + done, juce::jmin (256, length - done), done, barStart, beat);
+
+            std::vector<double> lags;
+            calibrator.readLags (lags);
+            return lags;
+        };
+
+        {
+            const auto lags = run (37.0, 2.0, 14, 1000.0);
+            const auto result = LatencyCalibrator::analyse (lags);
+            check (lags.size() == 14, "one hit per strum: " + juce::String ((int) lags.size()) + " of 14");
+            check (result.ok && std::abs (result.lagMs - 37.0) < 1.5,
+                   "37 ms late strums measure " + juce::String (result.lagMs, 1) + " ms (spread " + juce::String (result.spreadMs, 1) + ")");
+        }
+
+        {
+            const auto result = LatencyCalibrator::analyse (run (-12.0, 2.0, 14, 0.0));
+            check (result.ok && std::abs (result.lagMs + 12.0) < 1.5, "early strums give a negative lag: " + juce::String (result.lagMs, 1) + " ms");
+        }
+
+        {
+            // A skipped beat and two stray values: the median ignores them.
+            auto lags = run (60.0, 1.0, 12, 0.0, { 5 });
+            lags.push_back (250.0);
+            lags.push_back (-200.0);
+            const auto result = LatencyCalibrator::analyse (lags);
+            check (result.ok && std::abs (result.lagMs - 60.0) < 1.5 && result.used == 11,
+                   "outliers ignored: " + juce::String (result.lagMs, 1) + " ms from " + juce::String (result.used) + " of " + juce::String (result.total));
+        }
+
+        {
+            std::vector<double> uneven { 10, 80, -40, 150, 30, -90, 200, 5, 60, -150 };
+            check (! LatencyCalibrator::analyse (uneven).ok, "random hits are rejected");
+            check (! LatencyCalibrator::analyse ({ 30.0, 31.0, 29.0 }).ok, "too few hits are rejected");
+        }
+    }
 }
 
 int main()
@@ -1096,6 +1364,8 @@ int main()
     testLooper();
     testPlayHead();
     testFootswitch();
+    testLatencyCalibration();
+    testLoopFiles();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

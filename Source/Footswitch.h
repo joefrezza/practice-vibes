@@ -105,7 +105,9 @@ public:
     double secondsSinceActivity (int index) const;
     bool isDown (int index) const noexcept          { return runtime[(size_t) index].down; }
 
-    std::function<void (FootswitchAction)> perform;
+    /** `pressSeconds`: when the switch was pressed (Time::getMillisecondCounterHiRes() / 1000),
+        or 0 for actions without a precise moment (holds). */
+    std::function<void (FootswitchAction, double pressSeconds)> perform;
     std::function<void()> onChange;                 // learned or settings changed: save and refresh the UI
 
     std::unique_ptr<juce::XmlElement> toXml() const;
@@ -122,7 +124,7 @@ private:
 
     void timerCallback() override;
     static double timeNow();
-    void fire (int index, const FootswitchAction&, const char* gesture);
+    void fire (int index, const FootswitchAction&, const char* gesture, double pressSeconds);
     void finishPending (bool momentary);
     void changed();
 

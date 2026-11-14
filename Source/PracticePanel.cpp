@@ -197,7 +197,7 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
                                                              &bpmSlider, &clickVolumeSlider, &bpmLabel, &beatsLabel,
                                                              &clickVolumeLabel, &beatsBox, &trainerToggle, &followToggle, &stepSlider,
                                                              &subdivisionBox, &soundBox, &subdivisionLabel, &soundLabel,
-                                                             &subLevelLabel, &subLevelSlider,
+                                                             &subLevelLabel, &subLevelSlider, &swingLabel, &swingSlider,
                                                              &intervalSlider, &maxBpmSlider, &unitBox, &stepLabel,
                                                              &everyLabel, &maxLabel })
         addAndMakeVisible (c);
@@ -241,7 +241,7 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
     subdivisionBox.onChange = [this]
     {
         metronome.subdivision = subdivisionBox.getSelectedId() - 1;
-        subLevelSlider.setEnabled (subdivisionBox.getSelectedId() > 1);
+        updateSubdivisionControls();
     };
 
     styleLabel (soundLabel, "Sound");
@@ -254,7 +254,28 @@ PracticePanel::PracticePanel (PlayerProcessor& p, MetronomeProcessor& m)
     styleLabel (subLevelLabel, "Subdivision vol.");
     styleHorizontal (subLevelSlider, 0.0, 100.0, 1.0, metronome.subdivisionLevel.load() * 100.0, " %");
     subLevelSlider.onValueChange = [this] { metronome.subdivisionLevel = (float) (subLevelSlider.getValue() / 100.0); };
-    subLevelSlider.setEnabled (metronome.subdivision.load() > 0);
+
+    styleLabel (swingLabel, "Swing");
+    styleHorizontal (swingSlider, 50.0, 75.0, 1.0, 50.0, {});
+    swingSlider.setValue (metronome.swing.load() * 100.0, juce::dontSendNotification);
+    swingSlider.textFromValueFunction = [] (double v)
+    {
+        const auto percent = juce::roundToInt (v);
+        return percent <= 50 ? juce::String ("Straight")
+             : percent == 67 ? juce::String ("Shuffle")
+             : percent >= 75 ? juce::String ("Dotted")
+                             : juce::String (percent) + " %";
+    };
+    swingSlider.valueFromTextFunction = [] (const juce::String& text)
+    {
+        const auto t = text.trim().toLowerCase();
+        return t.startsWith ("straight") ? 50.0 : t.startsWith ("shuffle") ? 67.0 : t.startsWith ("dotted") ? 75.0
+                                                                                  : t.getDoubleValue();
+    };
+    swingSlider.updateText();
+    swingSlider.setTooltip ("Delays every second 8th (or 16th): 50 % = straight, 67 % = triplet shuffle, 75 % = dotted 8th + 16th.");
+    swingSlider.onValueChange = [this] { metronome.swing = swingSlider.getValue() / 100.0; };
+    updateSubdivisionControls();
 
     styleLabel (clickVolumeLabel, "Click volume");
     styleHorizontal (clickVolumeSlider, -40.0, 6.0, 0.5, juce::Decibels::gainToDecibels (metronome.gain.load()), " dB");
@@ -522,6 +543,14 @@ void PracticePanel::timerCallback()
     beatIndicator->update();
 }
 
+void PracticePanel::updateSubdivisionControls()
+{
+    const auto sub = (MetronomeProcessor::Subdivision) metronome.subdivision.load();
+    subLevelSlider.setEnabled (sub != MetronomeProcessor::Subdivision::quarters);
+    swingSlider.setEnabled (MetronomeProcessor::canSwing (sub));
+    swingLabel.setEnabled (swingSlider.isEnabled());
+}
+
 //==============================================================================
 void PracticePanel::paint (juce::Graphics& g)
 {
@@ -609,7 +638,15 @@ void PracticePanel::resized()
         soundBox.setBounds (row.removeFromLeft (120).reduced (0, 5));
     }
 
-    sliderRow (right, subLevelLabel, subLevelSlider);
+    {
+        auto row = right.removeFromTop (40);
+        auto half = row.removeFromLeft (row.getWidth() / 2);
+        subLevelLabel.setBounds (half.removeFromLeft (110));
+        subLevelSlider.setBounds (half.reduced (0, 4));
+        row.removeFromLeft (12);
+        swingLabel.setBounds (row.removeFromLeft (52));
+        swingSlider.setBounds (row.reduced (0, 4));
+    }
 
     {
         auto row = right.removeFromTop (36);

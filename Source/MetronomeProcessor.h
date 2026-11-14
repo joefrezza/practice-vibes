@@ -26,6 +26,23 @@ public:
     static int ticksPerBeat (Subdivision s)     { return s == Subdivision::eighths ? 2 : s == Subdivision::triplets ? 3
                                                        : s == Subdivision::sixteenths ? 4 : 1; }
 
+    /** Where tick `tick` of `ticks` falls within a beat (0..1). Swing (0.5 = straight, 2/3 = triplet
+        shuffle, 0.75 = dotted 8th + 16th) delays every second 8th, or every second 16th. */
+    static double tickFraction (int tick, int ticks, double swing)
+    {
+        swing = juce::jlimit (0.5, 0.75, swing);
+
+        if (ticks == 2)
+            return tick == 0 ? 0.0 : swing;
+
+        if (ticks == 4)
+            return (tick / 2) * 0.5 + (tick % 2 != 0 ? swing * 0.5 : 0.0);
+
+        return (double) tick / ticks;
+    }
+
+    static bool canSwing (Subdivision s)        { return s == Subdivision::eighths || s == Subdivision::sixteenths; }
+
     // Settings (UI -> audio)
     std::atomic<double> startBpm { 100.0 };
     std::atomic<int> beatsPerBar { 4 };
@@ -34,6 +51,7 @@ public:
     std::atomic<int> subdivision { (int) Subdivision::quarters };
     std::atomic<int> sound { (int) Sound::beep };
     std::atomic<float> subdivisionLevel { 0.45f };   // relative to a normal beat
+    std::atomic<double> swing { 0.5 };               // 0.5 straight .. 0.75 dotted (8ths and 16ths only)
     std::atomic<bool> clicksMuted { false };         // silent clicks, clock keeps running (e.g. drum plugin plays)
 
     std::atomic<bool> trainerEnabled { false };
@@ -130,6 +148,7 @@ private:
     void onBarLine();
     void renderFollowingTicks (int numSamples, const ChordTrack&, std::vector<int>& tickOffsets);
     double followTickTime (const ChordTrack&, int beat, int tick, int ticks) const;
+    double tickSwing() const noexcept;
     void trigger (double frequency, double frequencyEnd, float toneLevel, double toneDecaySeconds,
                   float noiseLevel = 0.0f, double noiseDecaySeconds = 0.01, float highPass = 0.0f);
     float renderVoices();
@@ -159,6 +178,7 @@ private:
     // For plugins' play head: beats counted from start() up to barStart, and the bar before it.
     double barPpq = 0.0, previousBeatSamples = 24000.0;
     int barBeats = 4, lastTicks = 1, previousBarBeats = 4;
+    double lastSwing = 0.5;
     int nextBeat = 0, nextTick = 0;     // the NEXT tick within the current bar
     std::vector<Tick> clockTicks;
     double bpm = 100.0;

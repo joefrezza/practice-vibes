@@ -54,6 +54,7 @@ target_sources(PracticeVibes PRIVATE
     Source/ChordView.cpp
     Source/Footswitch.cpp
     Source/FootswitchPanel.cpp
+    Source/LoopFiles.cpp
     Source/Looper.cpp
     Source/LooperPanel.cpp
     Source/MainComponent.cpp
@@ -100,6 +101,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         Tests/AudioTests.cpp
         Source/ChordAnalyzer.cpp
         Source/Footswitch.cpp
+        Source/LoopFiles.cpp
         Source/Looper.cpp
         Source/MetronomeProcessor.cpp
         Source/PlayerProcessor.cpp)

@@ -56,7 +56,7 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void beginBlock (juce::int64 blockStart, int numSamples) override;
     void timerCallback() override;      // keeps the looper's latency compensation current
-    void performFootswitchAction (FootswitchAction);
+    void performFootswitchAction (FootswitchAction, double pressSeconds);
 
     /** Name of the system default output for the current device type ("" if unknown). */
     juce::String getSystemDefaultOutputName() const;

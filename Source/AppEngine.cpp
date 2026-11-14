@@ -42,7 +42,7 @@ AppEngine::AppEngine()
         footswitch->fromXml (*xml);
 
     footswitch->onChange = [this] { footswitch->toXml()->writeTo (getFootswitchFile()); };
-    footswitch->perform = [this] (FootswitchAction action) { performFootswitchAction (action); };
+    footswitch->perform = [this] (FootswitchAction action, double pressSeconds) { performFootswitchAction (action, pressSeconds); };
 
     midi->onMessage = [this] (const juce::MidiMessage& message, const juce::String& source)
     {
@@ -189,13 +189,13 @@ void AppEngine::beginBlock (juce::int64 blockStart, int numSamples)
     looper->beginBlock (blockStart, numSamples);
 }
 
-void AppEngine::performFootswitchAction (FootswitchAction action)
+void AppEngine::performFootswitchAction (FootswitchAction action, double pressSeconds)
 {
     using Kind = FootswitchAction::Kind;
 
     switch (action.kind)
     {
-        case Kind::trackPress: looper->pressTrack (action.track); break;
+        case Kind::trackPress: looper->pressTrack (action.track, pressSeconds); break;
         case Kind::trackClear: looper->clearTrack (action.track); break;
         case Kind::trackMute:  looper->toggleMute (action.track); break;
         case Kind::undo:       looper->undo(); break;

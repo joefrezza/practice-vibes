@@ -1,6 +1,7 @@
 #include "LooperPanel.h"
 #include "FootswitchPanel.h"
 #include "AppPaths.h"
+#include "LoopFiles.h"
 #include "Theme.h"
 
 namespace pv
@@ -73,6 +74,12 @@ public:
         nameLabel.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.7f));
         addAndMakeVisible (nameLabel);
 
+        pedalLabel.setFont (juce::FontOptions (12.0f));
+        pedalLabel.setJustificationType (juce::Justification::centred);
+        pedalLabel.setColour (juce::Label::textColourId, theme::highlight);
+        pedalLabel.setMinimumHorizontalScale (0.6f);
+        addAndMakeVisible (pedalLabel);
+
         pedalButton.onClick = [this] { looper.pressTrack (track); };
         pedalButton.setTooltip ("Record, then overdub / play (key " + juce::String (track + 1) + ")");
         addAndMakeVisible (pedalButton);
@@ -94,6 +101,17 @@ public:
             looper.setTrackGain (track, juce::Decibels::decibelsToGain ((float) volumeSlider.getValue(), -40.0f));
         };
         addAndMakeVisible (volumeSlider);
+    }
+
+    /** The footswitch(es) whose tap plays this track, e.g. "A"; empty = none. */
+    void setPedal (const juce::String& switches, const juce::String& tooltip)
+    {
+        if (pedalLabel.getText() != switches)
+        {
+            pedalLabel.setText (switches, juce::dontSendNotification);
+            pedalLabel.setTooltip (tooltip);
+            resized();
+        }
     }
 
     void update()
@@ -192,7 +210,14 @@ public:
     void resized() override
     {
         auto area = getLocalBounds().reduced (8, 6);
-        nameLabel.setBounds (area.removeFromLeft (36));
+        auto name = area.removeFromLeft (44);
+
+        if (pedalLabel.getText().isNotEmpty())
+            pedalLabel.setBounds (name.removeFromBottom (juce::jmin (18, name.getHeight() / 3)));
+        else
+            pedalLabel.setBounds ({});
+
+        nameLabel.setBounds (name);
         pedalButton.setBounds (area.removeFromLeft (juce::jmin (260, area.getWidth() / 3)).reduced (3));
         clearButton.setBounds (area.removeFromRight (80).reduced (3));
         muteButton.setBounds (area.removeFromRight (90).reduced (3));
@@ -204,7 +229,7 @@ private:
     Looper& looper;
     const int track;
 
-    juce::Label nameLabel;
+    juce::Label nameLabel, pedalLabel;
     juce::TextButton pedalButton, muteButton { "Mute" }, clearButton { "Clear" };
     juce::Slider volumeSlider;
     juce::Rectangle<int> progressArea;
@@ -324,10 +349,32 @@ LooperPanel::LooperPanel (AppEngine& e)
     offsetSlider.onValueChange = [this] { looper.latencyOffsetMs = (float) offsetSlider.getValue(); };
     offsetSlider.onDragEnd = [this] { saveSettings(); };
     styleLabel (latencyLabel, {}, 0.6f);
+    latencyLabel.setMinimumHorizontalScale (0.5f);
     styleLabel (hintLabel, {}, 0.7f);
     hintLabel.setJustificationType (juce::Justification::topLeft);
 
-    for (auto* c : std::initializer_list<juce::Component*> { &offsetLabel, &offsetSlider, &latencyLabel, &hintLabel })
+    calibrateButton.setTooltip ("Measure the latency: play short muted strums right on the clicks "
+                                "(or connect the audio output to the input with a cable).");
+    calibrateButton.onClick = [this]
+    {
+        if (calibrating)
+        {
+            calibrationMessage = "Calibration cancelled.";
+            endCalibration();
+        }
+        else
+        {
+            startCalibration();
+        }
+    };
+
+    saveButton.setTooltip ("Save every track as a WAV (plus a mix) in Documents > Practice Vibes > Loops, to load again later or use in a DAW.");
+    saveButton.onClick = [this] { saveLoops(); };
+    loadButton.setTooltip ("Load saved loops (the looper must be empty).");
+    loadButton.onClick = [this] { showLoadMenu(); };
+
+    for (auto* c : std::initializer_list<juce::Component*> { &offsetLabel, &offsetSlider, &calibrateButton, &latencyLabel, &hintLabel,
+                                                             &saveButton, &loadButton })
         addAndMakeVisible (*c);
 
     for (int t = 0; t < Looper::numTracks; ++t)
@@ -371,6 +418,9 @@ LooperPanel::LooperPanel (AppEngine& e)
 
 LooperPanel::~LooperPanel()
 {
+    if (calibrating)
+        endCalibration();
+
     engine.catalogue->removeChangeListener (this);
     saveSettings();
 }
@@ -476,6 +526,207 @@ void LooperPanel::openDrumEditor()
     showOverlay ("Drums: " + engine.chain->getDrumPluginName(), std::move (editor));
 }
 
+void LooperPanel::updatePedalBadges()
+{
+    auto& footswitch = *engine.footswitch;
+
+    for (int t = 0; t < Looper::numTracks; ++t)
+    {
+        juce::StringArray letters, details;
+
+        for (int i = 0; i < Footswitch::numSwitches; ++i)
+        {
+            const auto& sw = footswitch.getSwitch (i);
+            const auto tapsThis = sw.tap.kind == FootswitchAction::Kind::trackPress && sw.tap.track == t;
+
+            if (! sw.trigger.isValid() || ! tapsThis)
+                continue;
+
+            letters.add (Footswitch::switchName (i));
+            details.add ("Footswitch " + Footswitch::switchName (i) + ": tap = record / overdub / play"
+                         + (sw.momentary && sw.hold.kind != FootswitchAction::Kind::none ? ", hold = " + sw.hold.describe() : juce::String()));
+        }
+
+        rows[(size_t) t]->setPedal (letters.isEmpty() ? juce::String() : "pedal " + letters.joinIntoString ("+"),
+                                    details.joinIntoString ("\n"));
+    }
+}
+
+//==============================================================================
+void LooperPanel::showFileMessage (const juce::String& text)
+{
+    fileMessage = text;
+    fileMessageMs = juce::Time::getMillisecondCounterHiRes();
+}
+
+void LooperPanel::saveLoops()
+{
+    LoopSet set;
+    juce::String error;
+
+    if (! looper.copyLoops (set, error))
+    {
+        showFileMessage ("Not saved: " + error);
+        return;
+    }
+
+    const auto folder = LoopFiles::createSessionFolder (set);
+    const auto result = LoopFiles::save (set, folder);
+
+    if (result.failed())
+    {
+        showFileMessage ("Not saved: " + result.getErrorMessage());
+        juce::Logger::writeToLog ("Saving loops failed: " + result.getErrorMessage());
+        return;
+    }
+
+    juce::Logger::writeToLog ("Saved " + juce::String (set.getNumLoops()) + " loop(s) to " + folder.getFullPathName());
+    showFileMessage ("Saved " + juce::String (set.getNumLoops()) + (set.getNumLoops() == 1 ? " loop" : " loops")
+                     + " as \"" + folder.getFileName() + "\" (Loops folder: track WAVs + mix.wav).");
+}
+
+void LooperPanel::showLoadMenu()
+{
+    const auto sessions = LoopFiles::listSessions();
+    juce::PopupMenu menu;
+
+    if (sessions.isEmpty())
+        menu.addItem (-1, "No saved loops yet", false);
+
+    if (! looper.isEmpty())
+        menu.addSectionHeader ("Clear all loops before loading");
+
+    for (int i = 0; i < juce::jmin (30, sessions.size()); ++i)
+        menu.addItem (i + 1, LoopFiles::describe (sessions[i]), looper.isEmpty() && ! looper.isLoading());
+
+   #if ! JUCE_IOS
+    menu.addSeparator();
+    menu.addItem (1000, "Show the Loops folder");
+   #endif
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (loadButton),
+                        [safeThis = SafePointer<LooperPanel> (this), sessions] (int chosen)
+    {
+        if (safeThis == nullptr || chosen == 0)
+            return;
+
+        if (chosen == 1000)
+            LoopFiles::getLoopsFolder().revealToUser();
+        else if (juce::isPositiveAndBelow (chosen - 1, sessions.size()))
+            safeThis->loadLoops (sessions[chosen - 1]);
+    });
+}
+
+void LooperPanel::loadLoops (const juce::File& folder)
+{
+    LoopSet set;
+    const auto result = LoopFiles::load (folder, set);
+    juce::String error;
+
+    if (result.failed())
+        error = result.getErrorMessage();
+    else
+        looper.loadLoops (set, error);
+
+    if (error.isNotEmpty())
+    {
+        showFileMessage ("Not loaded: " + error);
+        juce::Logger::writeToLog ("Loading loops from " + folder.getFullPathName() + " failed: " + error);
+        return;
+    }
+
+    // Record mode and tempo come from the session.
+    (set.source == Looper::Source::beforeFx ? beforeFxButton : afterFxButton).setToggleState (true, juce::dontSendNotification);
+    saveSettings();
+    juce::Logger::writeToLog ("Loaded loops from " + folder.getFullPathName());
+    showFileMessage ("Loaded \"" + folder.getFileName() + "\": the loops play from the metronome's first downbeat.");
+}
+
+//==============================================================================
+namespace
+{
+    constexpr int warmUpHits = 2;           // the first strums are often off: ignored
+    constexpr int calibrationHits = 12;
+    constexpr double calibrationTimeoutMs = 45000.0;
+}
+
+void LooperPanel::startCalibration()
+{
+    calibrating = true;
+    calibrationLags.clear();
+    calibrationStartMs = juce::Time::getMillisecondCounterHiRes();
+    calibrationMessage.clear();
+
+    // The clicks must be audible and follow the bar clock.
+    followSongBefore = metronome.followSong.load();
+    clicksMutedBefore = metronome.clicksMuted.load();
+    metronome.followSong = false;
+    metronome.clicksMuted = false;
+    stopMetronomeAfterCalibration = ! metronome.isRunning();
+
+    if (stopMetronomeAfterCalibration)
+        metronome.start();
+
+    looper.calibrator.start();
+    calibrateButton.setButtonText ("Cancel");
+}
+
+void LooperPanel::endCalibration()
+{
+    looper.calibrator.stop();
+    calibrating = false;
+    calibrationMessageMs = juce::Time::getMillisecondCounterHiRes();
+    metronome.followSong = followSongBefore;
+    metronome.clicksMuted = clicksMutedBefore;
+
+    if (stopMetronomeAfterCalibration)
+        metronome.stop();
+
+    calibrateButton.setButtonText ("Calibrate...");
+}
+
+void LooperPanel::updateCalibration()
+{
+    if (! calibrating)
+        return;
+
+    looper.calibrator.readLags (calibrationLags);
+    const auto hits = (int) calibrationLags.size() - warmUpHits;
+
+    if (hits < calibrationHits)
+    {
+        if (juce::Time::getMillisecondCounterHiRes() - calibrationStartMs > calibrationTimeoutMs)
+        {
+            calibrationMessage = calibrationLags.empty()
+                                   ? "Calibration stopped: no strums detected. Check that the guitar input is working (meter in the Guitar rig tab)."
+                                   : "Calibration stopped: only " + juce::String (calibrationLags.size()) + " strums detected in 45 s. Try again.";
+            endCalibration();
+        }
+
+        return;
+    }
+
+    const auto result = LatencyCalibrator::analyse ({ calibrationLags.begin() + warmUpHits, calibrationLags.end() });
+    const auto rate = juce::jmax (1.0, looper.getSampleRate());
+    const auto deviceMs = looper.deviceLatencySamples.load() * 1000.0 / rate;
+
+    if (result.ok)
+    {
+        const auto offset = juce::jlimit (-100.0, 100.0, result.lagMs - deviceMs);
+        offsetSlider.setValue (offset, juce::sendNotificationSync);
+        saveSettings();
+        calibrationMessage = "Calibrated: your strums arrive " + juce::String (result.lagMs, 1) + " ms after the click (spread "
+                             + juce::String (result.spreadMs, 1) + " ms); the audio device reports " + juce::String (deviceMs, 1)
+                             + " ms, so the fine-tune is now " + juce::String (offset, 1) + " ms.";
+    }
+    else
+    {
+        calibrationMessage = "Calibration failed: " + result.problem + ". Try again with short muted strums right on the clicks.";
+    }
+
+    endCalibration();
+}
+
 //==============================================================================
 void LooperPanel::loadSettings()
 {
@@ -516,6 +767,7 @@ void LooperPanel::timerCallback()
     for (auto& row : rows)
         row->update();
 
+    updatePedalBadges();
     beatDots->update();
 
     const auto empty = looper.isEmpty();
@@ -551,13 +803,42 @@ void LooperPanel::timerCallback()
                           juce::dontSendNotification);
 
     const auto rate = juce::jmax (1.0, looper.getSampleRate());
-    latencyLabel.setText ("Latency compensation " + juce::String (looper.getCompensationSamples() * 1000.0 / rate, 1)
-                              + " ms (audio device + plugins + fine-tune)",
+    latencyLabel.setText ("Compensation " + juce::String (looper.getCompensationSamples() * 1000.0 / rate, 1)
+                              + " ms (device + plugins + fine-tune)",
                           juce::dontSendNotification);
+
+    updateCalibration();
+
+    if (! calibrating && calibrationMessage.isNotEmpty() && juce::Time::getMillisecondCounterHiRes() - calibrationMessageMs > 30000.0)
+        calibrationMessage.clear();
+
+    if (fileMessage.isNotEmpty() && juce::Time::getMillisecondCounterHiRes() - fileMessageMs > 15000.0)
+        fileMessage.clear();
+
+    saveButton.setEnabled (! empty);
 
     juce::String hint;
 
-    if (locked)
+    if (calibrating)
+    {
+        const auto hits = juce::jmax (0, (int) calibrationLags.size() - warmUpHits);
+        hint = "Calibrating: play a short muted strum exactly on every click (or connect the output to the input with a cable). "
+               + juce::String (juce::jmin (hits, calibrationHits)) + " / " + juce::String (calibrationHits)
+               + (calibrationLags.size() < (size_t) warmUpHits ? " (warming up)" : "");
+    }
+    else if (fileMessage.isNotEmpty())
+    {
+        hint = fileMessage;
+    }
+    else if (calibrationMessage.isNotEmpty())
+    {
+        hint = calibrationMessage;
+    }
+    else if (looper.isLoading())
+    {
+        hint = "Loaded loops start with the metronome.";
+    }
+    else if (locked)
         hint = "Tempo and bar length are locked while there are loops. Clear all to change them.";
     else if (empty)
         hint = "Tap Record (or press 1-4): recording starts on the nearest bar line. "
@@ -665,6 +946,9 @@ void LooperPanel::resized()
     auto bottom = area.removeFromBottom (36);
     offsetLabel.setBounds (bottom.removeFromLeft (140));
     offsetSlider.setBounds (bottom.removeFromLeft (juce::jmin (360, bottom.getWidth() / 2)).reduced (0, 4));
+    calibrateButton.setBounds (bottom.removeFromLeft (120).reduced (6, 3));
+    loadButton.setBounds (bottom.removeFromRight (120).reduced (3));
+    saveButton.setBounds (bottom.removeFromRight (110).reduced (3));
     latencyLabel.setBounds (bottom.reduced (12, 0));
 
     hintLabel.setBounds (area.removeFromBottom (54));

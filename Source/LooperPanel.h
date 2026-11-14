@@ -32,6 +32,7 @@ private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;     // plugin catalogue
     void refreshDrumList();
+    void updatePedalBadges();
     void drumChosen();
     void openDrumEditor();
     void loadSettings();
@@ -50,6 +51,25 @@ private:
                      muteAllButton { "Mute all" }, clearAllButton { "Clear all" },
                      footswitchButton { "Footswitch..." };
     std::unique_ptr<BeatDots> beatDots;
+
+    // Latency calibration: play muted strums on the clicks (or loop the output back to the input).
+    juce::TextButton calibrateButton { "Calibrate..." };
+    bool calibrating = false, stopMetronomeAfterCalibration = false, followSongBefore = false, clicksMutedBefore = false;
+    std::vector<double> calibrationLags;
+    double calibrationStartMs = 0.0, calibrationMessageMs = 0.0;
+    juce::String calibrationMessage;
+    // Saving / loading loops (folders under LoopFiles::getLoopsFolder())
+    juce::TextButton saveButton { "Save loops" }, loadButton { "Load loops..." };
+    juce::String fileMessage;
+    double fileMessageMs = 0.0;
+    void saveLoops();
+    void showLoadMenu();
+    void loadLoops (const juce::File& folder);
+    void showFileMessage (const juce::String&);
+
+    void startCalibration();
+    void updateCalibration();
+    void endCalibration();
 
     // Drum machine (an instrument plugin following the bar clock)
     juce::Label drumsLabel, drumStatus;

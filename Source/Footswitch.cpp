@@ -261,7 +261,7 @@ bool Footswitch::handleMidi (const juce::MidiMessage& message, double now)
         if (! sw.momentary)
         {
             rt.activity = now;
-            fire (i, sw.tap, "tap");
+            fire (i, sw.tap, "tap", now);
         }
         else if (pressed)
         {
@@ -269,7 +269,7 @@ bool Footswitch::handleMidi (const juce::MidiMessage& message, double now)
             rt.holdFired = false;
             rt.downTime = now;
             rt.activity = now;
-            fire (i, sw.tap, "tap");
+            fire (i, sw.tap, "tap", now);
 
             if (sw.hold.kind != FootswitchAction::Kind::none)
                 startTimerHz (30);
@@ -310,7 +310,7 @@ void Footswitch::update (double now)
         {
             rt.holdFired = true;
             rt.activity = now;
-            fire (i, sw.hold, "hold");
+            fire (i, sw.hold, "hold", 0.0);
         }
         else
         {
@@ -342,7 +342,7 @@ void Footswitch::finishPending (bool momentary)
     changed();
 }
 
-void Footswitch::fire (int index, const FootswitchAction& action, const char* gesture)
+void Footswitch::fire (int index, const FootswitchAction& action, const char* gesture, double pressSeconds)
 {
     if (action.kind == FootswitchAction::Kind::none)
         return;
@@ -350,7 +350,7 @@ void Footswitch::fire (int index, const FootswitchAction& action, const char* ge
     juce::Logger::writeToLog ("Footswitch " + switchName (index) + " " + gesture + ": " + action.describe());
 
     if (perform)
-        perform (action);
+        perform (action, pressSeconds);
 }
 
 //==============================================================================

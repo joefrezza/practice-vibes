@@ -9,6 +9,7 @@ namespace
     constexpr double historySeconds = 1.5;
     constexpr double retroSeconds = 0.4;        // a press this late after a bar line still starts on it
     constexpr int mergeChunk = 65536;           // samples per block when merging/discarding an overdub layer
+    constexpr double maxPressAge = 0.5;         // a dated press is moved back at most this far (s)
 
     /** A graph node that hands its audio to one side of the looper. */
     class LooperNode final : public juce::AudioProcessor
@@ -95,13 +96,13 @@ void Looper::push (Command command)
         commands[(size_t) scope.startIndex1] = command;
 }
 
-void Looper::pressTrack (int track)
+void Looper::pressTrack (int track, double pressSeconds)
 {
     if (! juce::isPositiveAndBelow (track, numTracks))
         return;
 
     const auto state = getState (track);
-    Command command { Command::Type::press, track, false };
+    Command command { Command::Type::press, track, false, pressSeconds };
 
     // Buffers are allocated here, never on the audio thread. An empty track's buffer and the
     // overdub layers are untouched by the audio thread until the command below arrives.
@@ -149,8 +150,227 @@ void Looper::setTrackGain (int track, float gain)
         status[(size_t) track].gain = juce::jmax (0.0f, gain);
 }
 
+bool Looper::copyLoops (LoopSet& set, juce::String& error)
+{
+    if (isEmpty())
+    {
+        error = "There are no loops to save.";
+        return false;
+    }
+
+    const auto id = ++freezeCounter;
+    freezeRequest.store (id, std::memory_order_release);
+    const auto deadline = juce::Time::getMillisecondCounter() + 1000;
+    int ack = 0;
+
+    while ((ack = freezeAck.load (std::memory_order_acquire)) != id && ack != -id)
+    {
+        if (juce::Time::getMillisecondCounter() > deadline)
+        {
+            freezeRequest = 0;
+            error = "The audio device is not running.";
+            return false;
+        }
+
+        juce::Thread::sleep (2);
+    }
+
+    if (ack == -id)
+    {
+        freezeRequest = 0;
+        error = "Finish recording or overdubbing first.";
+        return false;
+    }
+
+    // Frozen: the audio thread only reads the buffers until freezeRequest goes back to 0.
+    set.sampleRate = sampleRateAtomic.load();
+    set.barSamples = frozen.barSamples;
+    set.beatsPerBar = frozen.beats;
+    set.source = (Source) frozen.source;
+    const auto channels = set.source == Source::beforeFx ? 1 : 2;
+
+    for (int t = 0; t < numTracks; ++t)
+    {
+        const auto& f = frozen.tracks[(size_t) t];
+        auto& loop = set.loops[(size_t) t];
+        loop.audio.setSize (0, 0);
+        loop.bars = 0;
+        loop.muted = f.muted;
+        loop.gain = status[(size_t) t].gain.load();
+
+        if (f.state != State::playing || f.period <= 0.0)
+            continue;
+
+        const auto& track = tracks[(size_t) t];
+        const auto length = juce::jmin ((int) std::round (f.period), track.audio.getNumSamples());
+        const auto offset = positiveIndex (frozen.anchor - f.origin, f.period);   // where the shared bar line falls
+        loop.audio.setSize (channels, length);
+        loop.bars = f.bars;
+
+        for (int c = 0; c < channels; ++c)
+        {
+            auto* dest = loop.audio.getWritePointer (c);
+
+            for (int i = 0; i < length; ++i)
+                dest[i] = track.audio.getSample (c, (offset + i) % length);
+
+            // Overdubs not merged into the track yet (the undoable one, one being merged)
+            for (auto& layer : layers)
+                if (layer.owner == t && (layer.status == Layer::Status::undoable || layer.status == Layer::Status::merging))
+                    for (int i = 0; i < length; ++i)
+                        dest[i] += layer.audio.getSample (c, (offset + i) % length);
+        }
+    }
+
+    freezeRequest.store (0, std::memory_order_release);
+    return true;
+}
+
+bool Looper::loadLoops (const LoopSet& set, juce::String& error)
+{
+    if (! isEmpty() || isLoading())
+    {
+        error = "Clear all loops first.";
+        return false;
+    }
+
+    const auto bpm = set.getBpm();
+
+    if (set.getNumLoops() == 0 || bpm < 20.0 || bpm > 400.0)
+    {
+        error = "These loops can't be used (no loops, or tempo out of range).";
+        return false;
+    }
+
+    const auto rate = sampleRateAtomic.load();
+    const auto ratio = set.sampleRate / rate;       // input samples per output sample
+    const auto barSamplesHere = set.barSamples / ratio;
+
+    for (auto& loop : set.loops)
+    {
+        if (loop.bars * barSamplesHere > maxTrackSamples())
+        {
+            error = "A loop is longer than " + juce::String ((int) maxLoopSeconds) + " seconds.";
+            return false;
+        }
+    }
+
+    // The tracks are empty, so the audio thread doesn't touch their buffers.
+    for (int t = 0; t < numTracks; ++t)
+    {
+        const auto& loop = set.loops[(size_t) t];
+        const auto used = loop.bars > 0 && loop.audio.getNumSamples() > 0 && loop.audio.getNumChannels() > 0;
+        pendingLoad.bars[(size_t) t] = used ? loop.bars : 0;
+        pendingLoad.muted[(size_t) t] = loop.muted;
+
+        if (! used)
+            continue;
+
+        auto& track = tracks[(size_t) t];
+        ensureAllocated (track.audio, 2);
+        track.audio.clear();
+        const auto inLength = loop.audio.getNumSamples();
+        const auto outLength = juce::jmin (track.audio.getNumSamples(), (int) std::round (inLength / ratio));
+
+        for (int c = 0; c < 2; ++c)
+        {
+            const auto* in = loop.audio.getReadPointer (juce::jmin (c, loop.audio.getNumChannels() - 1));
+
+            if (std::abs (ratio - 1.0) < 1.0e-9)
+            {
+                track.audio.copyFrom (c, 0, in, juce::jmin (inLength, outLength));
+            }
+            else
+            {
+                juce::LagrangeInterpolator interpolator;
+                interpolator.process (ratio, in, track.audio.getWritePointer (c), outLength, inLength, inLength);
+            }
+        }
+
+        setTrackGain (t, loop.gain);
+    }
+
+    pendingLoad.source = (int) set.source;
+    source = (int) set.source;
+    metronome.startBpm = bpm;
+    metronome.beatsPerBar = set.beatsPerBar;
+    loadPendingFlag = true;
+    push ({ Command::Type::load, 0 });
+    return true;
+}
+
 //==============================================================================
 // Audio thread
+
+bool Looper::handleFreeze()
+{
+    const auto request = freezeRequest.load (std::memory_order_acquire);
+
+    if (request == 0)
+    {
+        frozenNow = false;
+        return false;
+    }
+
+    if (request != handledFreeze)
+    {
+        handledFreeze = request;
+        auto busy = loadWaiting;
+
+        for (auto& track : tracks)
+            busy = busy || track.state == State::armed || track.state == State::recording
+                        || track.state == State::overdubbing || track.firstPass;
+
+        for (auto& layer : layers)
+            busy = busy || layer.status == Layer::Status::active;
+
+        frozen.anchor = gridAnchor;
+        frozen.barSamples = gridBarSamples;
+        frozen.beats = gridBeats;
+        frozen.source = lockedSource;
+
+        for (size_t t = 0; t < tracks.size(); ++t)
+            frozen.tracks[t] = { tracks[t].state, tracks[t].origin, tracks[t].period, tracks[t].bars, tracks[t].muted };
+
+        frozenNow = ! busy;
+        freezeAck.store (busy ? -request : request, std::memory_order_release);
+    }
+
+    return frozenNow;
+}
+
+void Looper::resolveLoad()
+{
+    if (! loadWaiting || ! metronome.isClockRunning() || metronome.getClockStartTime() <= (double) loadRequestedAt)
+        return;
+
+    loadWaiting = false;
+    gridAnchor = metronome.getClockStartTime();
+    gridBarSamples = metronome.getClockBarSamples();
+    gridBeats = metronome.getClockBeatsPerBar();
+    lockedSource = pendingLoad.source;
+
+    for (int t = 0; t < numTracks; ++t)
+    {
+        auto& track = tracks[(size_t) t];
+        const auto bars = pendingLoad.bars[(size_t) t];
+
+        if (bars <= 0 || track.state != State::empty)
+            continue;
+
+        clear (t);
+        track.state = State::playing;
+        track.muted = pendingLoad.muted[(size_t) t];
+        track.lastGain = track.muted ? 0.0f : status[(size_t) t].gain.load();   // no fade-in from the old volume
+        track.bars = bars;
+        track.period = bars * gridBarSamples;
+        track.origin = gridAnchor;
+        track.baseStart = track.baseEnd = gridAnchor;
+        track.playStart = gridAnchor;
+    }
+
+    loadPendingFlag = false;
+}
 
 void Looper::prepare (double newSampleRate, int maximumBlockSize)
 {
@@ -176,6 +396,7 @@ void Looper::prepare (double newSampleRate, int maximumBlockSize)
         updateGridAndStatus();
     }
 
+    calibrator.prepare (sampleRate);
     const auto historyLength = (int) std::ceil (historySeconds * sampleRate);
 
     if (dryHistory.getNumSamples() != historyLength)
@@ -204,10 +425,19 @@ void Looper::beginBlock (juce::int64 blockStart, int numSamples)
 {
     now = blockStart;
     blockLength = numSamples;
+    blockWallSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    eventTime = musicalNow();
 
     const auto offset = (double) latencyOffsetMs.load() * sampleRate / 1000.0;
     comp = juce::jmax (0, deviceLatencySamples.load() + chainLatencySamples.load() + juce::roundToInt (offset));
     compensation = comp;
+
+    if (handleFreeze())
+    {
+        // The message thread is copying the loops: nothing may change them (commands wait).
+        updateGridAndStatus();
+        return;
+    }
 
     {
         const auto scope = fifo.read (fifo.getNumReady());
@@ -215,6 +445,9 @@ void Looper::beginBlock (juce::int64 blockStart, int numSamples)
         for (int i = 0; i < scope.blockSize1; ++i)  handle (commands[(size_t) (scope.startIndex1 + i)]);
         for (int i = 0; i < scope.blockSize2; ++i)  handle (commands[(size_t) (scope.startIndex2 + i)]);
     }
+
+    eventTime = musicalNow();
+    resolveLoad();
 
     const auto m = musicalNow();
 
@@ -241,11 +474,22 @@ void Looper::beginBlock (juce::int64 blockStart, int numSamples)
 
 void Looper::handle (const Command& command)
 {
+    eventTime = command.pressSeconds > 0.0 ? musicalTimeOf (command.pressSeconds) : musicalNow();
+
     if (command.type == Command::Type::clearAll)
     {
         for (int t = 0; t < numTracks; ++t)
             clear (t);
 
+        return;
+    }
+
+    if (command.type == Command::Type::load)
+    {
+        // The loops start on the metronome's first downbeat after this (re)start.
+        loadWaiting = true;
+        loadRequestedAt = now;
+        metronome.start();
         return;
     }
 
@@ -281,6 +525,7 @@ void Looper::handle (const Command& command)
 
         case Command::Type::clearAll:
         case Command::Type::undo:
+        case Command::Type::load:
             break;
     }
 }
@@ -297,7 +542,7 @@ void Looper::finishActive (int exceptTrack)
         if (other.state == State::armed)
             clear (t);
         else if (other.state == State::recording)
-            finishFirstRecording (other, musicalNow());
+            finishFirstRecording (other, eventTime);
         else if (other.state == State::overdubbing)
             stopOverdub (other);
     }
@@ -330,10 +575,10 @@ void Looper::press (int t, bool countIn)
             break;
 
         case State::recording:
-            if (musicalNow() < track.origin)
+            if (eventTime < track.origin)
                 clear (t);          // still waiting for its bar line: cancel
             else
-                finishFirstRecording (track, musicalNow());
+                finishFirstRecording (track, eventTime);
             break;
 
         case State::playing:
@@ -365,7 +610,7 @@ void Looper::resolveArmed (Track& track)
         gridBeats = metronome.getClockBeatsPerBar();
     }
 
-    const auto m = musicalNow();
+    const auto m = eventTime;
     double origin = -1.0;
 
     if (track.countIn)
@@ -384,7 +629,7 @@ void Looper::resolveArmed (Track& track)
     }
 
     track.origin = origin;
-    track.backfill = origin < m;
+    track.backfill = origin < musicalNow();
     track.firstPass = true;
     track.baseStart = origin;
     track.dubStart = track.dubEnd = 0.0;
@@ -459,15 +704,23 @@ void Looper::startOverdub (int t)
     layer.progress = 0;
 
     track.layer = index;
-    track.dubStart = juce::jmax (musicalNow(), track.firstPass ? track.baseEnd : 0.0);
+    track.dubStart = juce::jmax (eventTime, track.firstPass ? track.baseEnd : 0.0);
     track.dubEnd = never;
     track.state = State::overdubbing;
+
+    // A dated press: what was played since the stomp is already in the input history.
+    if (track.dubStart < musicalNow())
+        backfillLayer (track, track.dubStart, musicalNow(), 1.0f);
 }
 
 void Looper::stopOverdub (Track& track)
 {
-    track.dubEnd = musicalNow();
+    track.dubEnd = juce::jmax (track.dubStart, eventTime);
     track.state = State::playing;
+
+    // A dated press: take out what was recorded after the stomp (it is in the history too).
+    if (track.layer >= 0 && track.dubEnd < musicalNow())
+        backfillLayer (track, track.dubEnd, musicalNow(), -1.0f);
 
     if (track.layer >= 0)
     {
@@ -581,6 +834,42 @@ void Looper::updateGridAndStatus()
     undoAvailable = undoLayer >= 0 || overdubbing;
     activeSource = lockedSource;
     currentBar = hasGrid() ? (int) std::floor (((double) now - gridAnchor) / gridBarSamples) : -1;
+}
+
+double Looper::musicalTimeOf (double pressSeconds) const noexcept
+{
+    // Input sample now + blockLength arrived about when this callback started.
+    const auto graph = (double) (now + blockLength) - (blockWallSeconds - pressSeconds) * sampleRate;
+    return juce::jlimit ((double) now - maxPressAge * sampleRate, (double) now, graph) - comp;
+}
+
+void Looper::backfillLayer (Track& track, double from, double to, float sign)
+{
+    if (track.layer < 0 || track.period <= 0.0)
+        return;
+
+    auto& layer = layers[(size_t) track.layer].audio;
+    const auto& history = lockedSource == (int) Source::beforeFx ? dryHistory : wetHistory;
+    const auto historyLength = (juce::int64) history.getNumSamples();
+    const auto layerLength = juce::jmin (layer.getNumSamples(), trackLength (track));
+
+    if (historyLength == 0)
+        return;
+
+    // Graph times (history index) whose musical time m = g - comp lies in [from, to).
+    const auto first = juce::jmax ((juce::int64) std::ceil (from + comp), now - historyLength + 1);
+    const auto last = juce::jmin ((juce::int64) std::ceil (to + comp), now);
+
+    for (auto g = first; g < last; ++g)
+    {
+        const auto index = positiveIndex ((double) (g - comp) - track.origin, track.period);
+
+        if (index >= layerLength)
+            continue;
+
+        for (int c = 0; c < history.getNumChannels() && c < layer.getNumChannels(); ++c)
+            layer.addSample (c, index, sign * history.getSample (c, (int) (g % historyLength)));
+    }
 }
 
 //==============================================================================
@@ -726,6 +1015,9 @@ void Looper::play (Track& track, Status& s, float* left, float* right, int numSa
 
 void Looper::processBeforeFx (float* mono, int numSamples)
 {
+    if (metronome.isClockRunning())
+        calibrator.process (mono, numSamples, now, metronome.getClockBarStart(), metronome.getClockBeatSamples());
+
     if (lockedSource == (int) Source::beforeFx)
     {
         const float* input[] = { mono };
