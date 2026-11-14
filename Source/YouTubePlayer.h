@@ -31,6 +31,7 @@ public:
     void load (const YouTubeLink&, const juce::String& title);
     void unload();
     bool hasVideo() const noexcept               { return videoId.isNotEmpty(); }
+    const juce::String& getVideoId() const noexcept { return videoId; }
 
     void play();
     void pause();

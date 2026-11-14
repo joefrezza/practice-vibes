@@ -275,6 +275,7 @@ bool Library::loadTopic (const juce::File& folder, Topic& topic)
         topic.title = xml->getStringAttribute ("title");
         topic.created = juce::Time::fromISO8601 (xml->getStringAttribute ("created"));
         topic.tags = parseTags (xml->getStringAttribute ("tags"));
+        topic.inRotation = xml->getBoolAttribute ("rotation", false);
 
         if (auto* d = xml->getChildByName ("DESCRIPTION"))
             topic.description = d->getAllSubText();
@@ -391,8 +392,16 @@ juce::String Library::computeSignature() const
         return sig;
 
     for (auto& entry : juce::RangedDirectoryIterator (root, true, "*", juce::File::findFilesAndDirectories))
-        sig << entry.getFile().getRelativePathFrom (root) << '|' << entry.getFileSize() << '|'
+    {
+        const auto relative = entry.getFile().getRelativePathFrom (root);
+
+        // App data folders (".practice"...) change while you play: they aren't topics.
+        if (relative.startsWithChar ('.') || relative.startsWithChar ('_'))
+            continue;
+
+        sig << relative << '|' << entry.getFileSize() << '|'
             << entry.getModificationTime().toMilliseconds() << '\n';
+    }
 
     return juce::String::toHexString (sig.hashCode64()) + ":" + juce::String (sig.length());
 }
@@ -421,6 +430,15 @@ Topic* Library::findTopic (const juce::String& topicId)
 {
     for (auto& t : topics)
         if (t.id == topicId)
+            return &t;
+
+    return nullptr;
+}
+
+const Topic* Library::findTopicForFile (const juce::File& file) const
+{
+    for (auto& t : topics)
+        if (file.isAChildOf (t.folder))
             return &t;
 
     return nullptr;
@@ -484,6 +502,9 @@ bool Library::saveTopic (const Topic& t)
 
     if (! t.tags.isEmpty())
         xml.setAttribute ("tags", joinTags (t.tags));
+
+    if (t.inRotation)
+        xml.setAttribute ("rotation", true);
 
     xml.createNewChildElement ("DESCRIPTION")->addTextElement (t.description);
 

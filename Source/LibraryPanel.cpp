@@ -271,6 +271,15 @@ public:
         deleteButton.onClick = [this] { owner.deleteTopic (topicId); };
         addAndMakeVisible (deleteButton);
 
+        practiseButton.onClick = [this] { if (owner.onPractise) owner.onPractise (topicId); };
+        practiseButton.setTooltip ("Make this the topic you're practising, and bring back the song, loop, speed and tempo you used last time");
+        practiseButton.setColour (juce::TextButton::buttonColourId, theme::accent);
+        addAndMakeVisible (practiseButton);
+
+        rotationToggle.setTooltip ("Topics in the rotation are listed on the Today tab, most neglected first");
+        rotationToggle.onClick = [this] { owner.setRotation (topicId, rotationToggle.getToggleState()); };
+        addAndMakeVisible (rotationToggle);
+
         addAndMakeVisible (styleCaption (notesLabel, "Notes"));
         descriptionEditor.setMultiLine (true, true);
         descriptionEditor.setReturnKeyStartsNewLine (true);
@@ -323,6 +332,7 @@ public:
             tagsEditor.setText (joinTags (topic.tags), false);
 
         createdLabel.setText ("Created " + formatDate (topic.created), juce::dontSendNotification);
+        rotationToggle.setToggleState (topic.inRotation, juce::dontSendNotification);
 
         conflictLabel.setVisible (! topic.conflictFiles.isEmpty());
         conflictLabel.setText ("Another device saved a different version of this topic at the same time: "
@@ -370,13 +380,16 @@ public:
         auto area = getLocalBounds();
 
         auto top = area.removeFromTop (44);
-        deleteButton.setBounds (top.removeFromRight (130).reduced (2, 4));
+        deleteButton.setBounds (top.removeFromRight (120).reduced (2, 4));
+        practiseButton.setBounds (top.removeFromRight (100).reduced (2, 4));
         top.removeFromRight (8);
-        createdLabel.setBounds (top.removeFromRight (170));
+        createdLabel.setBounds (top.removeFromRight (150));
         titleEditor.setBounds (top.reduced (0, 2));
 
         area.removeFromTop (6);
-        tagsEditor.setBounds (area.removeFromTop (30));
+        auto tagsRow = area.removeFromTop (30);
+        rotationToggle.setBounds (tagsRow.removeFromRight (200).withTrimmedLeft (12));
+        tagsEditor.setBounds (tagsRow);
         area.removeFromTop (4);
         notesLabel.setBounds (area.removeFromTop (26));
         const auto notesHeight = juce::jlimit (110, 360, (int) (area.getHeight() * 0.38f));
@@ -438,7 +451,9 @@ private:
     LibraryPanel& owner;
     juce::TextEditor titleEditor, tagsEditor, descriptionEditor;
     juce::Label createdLabel, notesLabel, resourcesLabel, conflictLabel, noResourcesLabel;
-    juce::TextButton deleteButton { "Delete topic" }, addFilesButton { "Add files..." }, addLinkButton { "Add link..." };
+    juce::TextButton deleteButton { "Delete topic" }, addFilesButton { "Add files..." }, addLinkButton { "Add link..." },
+                     practiseButton { "Practise" };
+    juce::ToggleButton rotationToggle { "In practice rotation" };
     juce::Viewport viewport;
     juce::Component rowHolder;
     std::vector<std::unique_ptr<ResourceRow>> rows;
@@ -736,6 +751,9 @@ void LibraryPanel::openLibrary (const juce::File& folder)
     selectedId = {};
     rebuildList (library->getTopics().empty() ? juce::String() : library->getTopics().front().id);
     resized();
+
+    if (onLibraryOpened)
+        onLibraryOpened();
 }
 
 void LibraryPanel::chooseFolder()
@@ -1008,6 +1026,84 @@ void LibraryPanel::showSelection()
 void LibraryPanel::refreshAfterRescan()
 {
     rebuildList (selectedId);
+
+    if (onTopicsChanged)
+        onTopicsChanged();
+}
+
+void LibraryPanel::checkForChanges()
+{
+    if (library == nullptr)
+        return;
+
+    flush();
+    const auto newSignature = library->computeSignature();
+
+    if (newSignature == signature)
+        return;
+
+    library->rescan();
+    signature = library->computeSignature();
+    refreshAfterRescan();
+}
+
+void LibraryPanel::selectTopic (const juce::String& topicId)
+{
+    if (library == nullptr || library->findTopic (topicId) == nullptr)
+        return;
+
+    flush();
+
+    if (auto* t = library->findTopic (topicId); ! t->matches (searchBox.getText()) || ! t->matchesTag (tagFilter))
+    {
+        searchBox.clear();
+        tagFilter = {};
+        updateTagButton();
+    }
+
+    rebuildList (topicId);
+}
+
+void LibraryPanel::setRotation (const juce::String& topicId, bool inRotation)
+{
+    auto* t = library != nullptr ? library->findTopic (topicId) : nullptr;
+
+    if (t == nullptr || t->inRotation == inRotation)
+        return;
+
+    flush();
+    t->inRotation = inRotation;
+
+    if (! library->saveTopic (*t))
+        showError ("Could not save " + t->folder.getChildFile (Library::topicFileName).getFullPathName());
+
+    signature = library->computeSignature();
+
+    if (onTopicsChanged)
+        onTopicsChanged();
+}
+
+bool LibraryPanel::openFirstMedia (const juce::String& topicId)
+{
+    auto* t = library != nullptr ? library->findTopic (topicId) : nullptr;
+
+    if (t == nullptr)
+        return false;
+
+    for (auto& r : t->resources)
+    {
+        const auto kind = kindOf (r);
+        const auto playable = (kind == ResourceKind::audio && ! t->isMissing (r))
+                           || (kind == ResourceKind::youtube && webViewAvailable() && parseYouTubeUrl (r.url).has_value());
+
+        if (playable)
+        {
+            openResource (*t, r);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 //==============================================================================
@@ -1031,6 +1127,9 @@ void LibraryPanel::flush()
             juce::Logger::writeToLog ("Library: could not save " + t->folder.getChildFile (Library::topicFileName).getFullPathName());
 
         signature = library->computeSignature();
+
+        if (onTopicsChanged)
+            onTopicsChanged();
     }
 }
 
@@ -1313,6 +1412,9 @@ void LibraryPanel::showInboxMenu (const juce::File& file, juce::Component& ancho
 //==============================================================================
 void LibraryPanel::openResource (const Topic& topic, const Resource& r)
 {
+    if (onTopicOpened)
+        onTopicOpened (topic.id);
+
     if (! r.isLink())
     {
         openFile (topic.getFile (r), r.title);

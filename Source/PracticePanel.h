@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "ChordView.h"
 #include "MetronomeProcessor.h"
+#include "PracticeLog.h"
 #include "PlayerProcessor.h"
 #include "WaveformView.h"
 
@@ -23,8 +24,20 @@ public:
     void resized() override;
     bool keyPressed (const juce::KeyPress&) override;
 
-    /** Loads a song into the player (also used by the Topics tab to open audio resources). */
-    void loadSong (const juce::URL&);
+    /** Loads a song into the player (also used by the Topics tab to open audio resources).
+        `then`: speed, pitch, loop and metronome to apply once it's loaded (restoring a practice setup). */
+    void loadSong (const juce::URL&, std::optional<PracticeSetup> then = std::nullopt);
+
+    /** What's on screen now, for the practice log (songPath: the song's full path). */
+    PracticeSetup captureSetup() const;
+
+    /** Speed, pitch, loop (for the song or video showing now) and metronome settings of a saved setup. */
+    void applySetup (const PracticeSetup&);
+
+    juce::File getSongFile() const                      { return songFile; }   // the loaded song's file, if local
+    bool isMediaPlaying() const;                        // the song or the video is playing
+    double getMediaSpeed() const                        { return speedSlider.getValue() / 100.0; }
+    juce::String getMediaName() const;
 
     /** YouTube mode: the video (drawn by MainComponent's YouTubePlayer over getVideoArea()) replaces the waveform;
         transport, A-B loop, speed and volume control the video. */
@@ -79,6 +92,8 @@ private:
                      setAButton { "Set A" }, setBButton { "Set B" }, loopButton { "Loop" }, clearLoopButton { "Clear loop" };
     double pendingLoopStart = -1.0;
     std::shared_ptr<const LoadedSong> shownSong;   // detects songs loaded from elsewhere (e.g. command line)
+    std::shared_ptr<const LoadedSong> songOfFile;  // the song `songFile` belongs to
+    juce::File songFile;
 
     // Chords: analysed in the background whenever a song is loaded.
     ChordView chordView;

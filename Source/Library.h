@@ -58,6 +58,7 @@ struct Topic
     juce::String title;
     juce::String description;
     juce::StringArray tags;
+    bool inRotation = false;    // offered on the Today tab ("haven't practised since...")
     std::vector<Resource> resources;
 
     juce::File folder;
@@ -96,6 +97,10 @@ public:
 
     const std::vector<Topic>& getTopics() const noexcept { return topics; }   // newest first
     Topic* findTopic (const juce::String& topicId);
+
+    /** The topic whose folder holds the file (e.g. a song loaded in the player), or nullptr. */
+    const Topic* findTopicForFile (const juce::File&) const;
+
     const juce::Array<juce::File>& getInbox() const noexcept { return inbox; }
 
     /** Every tag used by a topic or resource, sorted, with the first spelling found. */

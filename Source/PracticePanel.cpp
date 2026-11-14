@@ -615,13 +615,15 @@ void PracticePanel::openFile()
     });
 }
 
-void PracticePanel::loadSong (const juce::URL& url)
+void PracticePanel::loadSong (const juce::URL& url, std::optional<PracticeSetup> then)
 {
     closeYouTube();
     songLabel.setText ("Loading " + juce::URL::removeEscapeChars (url.getFileName()) + "...", juce::dontSendNotification);
     openButton.setEnabled (false);
 
-    player.loadAsync (url, [safeThis = SafePointer<PracticePanel> (this)] (const juce::String& error)
+    const auto file = url.isLocalFile() ? url.getLocalFile() : juce::File();
+
+    player.loadAsync (url, [safeThis = SafePointer<PracticePanel> (this), file, then] (const juce::String& error)
     {
         if (safeThis == nullptr)
             return;
@@ -634,8 +636,98 @@ void PracticePanel::loadSong (const juce::URL& url)
             return;
         }
 
+        safeThis->songFile = file;
+        safeThis->songOfFile = safeThis->player.getSong();
+
+        if (then.has_value())
+            safeThis->applySetup (*then);
+
         // The timer notices the new song and updates the waveform and labels.
     });
+}
+
+PracticeSetup PracticePanel::captureSetup() const
+{
+    PracticeSetup s;
+
+    if (youTubeMode && youtube != nullptr && youtube->hasVideo())
+    {
+        s.youTubeId = youtube->getVideoId();
+        s.youTubeTitle = youtube->getTitle();
+    }
+    else if (player.hasSong() && player.getSong() == songOfFile)
+    {
+        s.songPath = songFile.getFullPathName();
+    }
+
+    if (s.hasMedia())
+    {
+        s.speed = speedSlider.getValue() / 100.0;
+        s.semitones = youTubeMode ? 0.0 : pitchSlider.getValue();
+
+        if (loopExists())
+        {
+            s.loopStart = loopStartSeconds();
+            s.loopEnd = loopEndSeconds();
+            s.loopOn = loopIsEnabled();
+        }
+    }
+
+    if (metronome.isRunning())
+    {
+        s.metronome = true;
+        s.bpm = metronome.startBpm.load();
+        s.beatsPerBar = metronome.beatsPerBar.load();
+        s.subdivision = metronome.subdivision.load();
+    }
+
+    return s;
+}
+
+void PracticePanel::applySetup (const PracticeSetup& s)
+{
+    if (s.hasMedia())
+    {
+        speedSlider.setValue (s.speed * 100.0, juce::sendNotificationSync);
+
+        if (! youTubeMode)
+            pitchSlider.setValue (s.semitones, juce::sendNotificationSync);
+
+        if (s.loopEnd > s.loopStart)
+        {
+            setLoop (s.loopStart, s.loopEnd, s.loopOn);
+
+            if (! youTubeMode && s.loopOn)
+                player.seekToSeconds (s.loopStart);
+
+            pendingLoopStart = -1.0;
+            updateLoopButtons();
+        }
+    }
+
+    // The tempo stays put while the looper holds loops or the metronome follows the song.
+    if (s.metronome && s.bpm > 0.0 && ! metronome.isTempoLocked() && ! metronome.isFollowing())
+    {
+        metronome.startBpm = juce::jlimit (30.0, 300.0, s.bpm);
+        metronome.beatsPerBar = juce::jlimit (1, 12, s.beatsPerBar);
+        metronome.subdivision = s.subdivision;
+        metronome.tempoChangedByUser();
+        subdivisionBox.setSelectedId (s.subdivision + 1, juce::dontSendNotification);
+        updateSubdivisionControls();
+    }
+}
+
+bool PracticePanel::isMediaPlaying() const
+{
+    return youTubeMode ? (youtube != nullptr && youtube->getState().playing) : player.isPlaying();
+}
+
+juce::String PracticePanel::getMediaName() const
+{
+    if (youTubeMode)
+        return youtube != nullptr ? youtube->getTitle() : juce::String();
+
+    return shownSong != nullptr ? shownSong->name : juce::String();
 }
 
 void PracticePanel::togglePlay()

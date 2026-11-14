@@ -10,6 +10,7 @@
 #include "../Source/Looper.h"
 #include "../Source/MetronomeProcessor.h"
 #include "../Source/PlayerProcessor.h"
+#include "../Source/PracticeLog.h"
 #include "../Source/Tuner.h"
 #include "../Source/GainMeterProcessor.h"
 
@@ -1996,6 +1997,240 @@ static void testLibrary()
            "no video id (playlist, channel, other site, bad characters) -> not a YouTube video");
 }
 
+static void testPracticeLog()
+{
+    std::cout << "Practice log (played time, entries, setups)" << std::endl;
+
+    // --- PlayDetector: 10 ticks per second like the app's timer.
+    {
+        constexpr double dt = 0.1;
+        juce::Random random (42);
+
+        auto run = [&] (PlayDetector& d, double seconds, auto&& level)
+        {
+            double played = 0.0;
+
+            for (double t = 0.0; t < seconds - 1.0e-9; t += dt)
+                played += d.process (level (t), dt);
+
+            return played;
+        };
+
+        PlayDetector d;
+        check (run (d, 60.0, [] (double) { return 0.0f; }) == 0.0, "silence: nothing played");
+
+        d.reset();
+        const auto hum = run (d, 60.0, [&] (double) { return 0.01f * (0.9f + 0.2f * random.nextFloat()); });
+        check (hum < 1.0, "steady -40 dB hum is not playing: " + juce::String (hum, 1) + " s");
+
+        d.reset();
+        const auto hiss = run (d, 30.0, [&] (double) { return 0.003f * random.nextFloat(); });
+        check (hiss == 0.0, "-50 dB hiss is not playing");
+
+        // A note every 2 s on top of the hum, decaying from -10 dB: 60 s of playing.
+        d.reset();
+        run (d, 20.0, [&] (double) { return 0.01f; });
+        const auto notes = run (d, 60.0, [&] (double t) { return juce::jmax (0.01f, 0.3f * (float) std::exp (-std::fmod (t, 2.0) * 2.0)); });
+        check (notes > 58.0 && notes <= 60.0 + 1.0e-6, "notes over hum: 60 s played, counted " + juce::String (notes, 1) + " s");
+
+        // Stopping: counted for the grace period only.
+        const auto after = run (d, 30.0, [&] (double) { return 0.01f; });
+        check (after > 3.5 && after < 6.5, "after the last note only the grace period counts: " + juce::String (after, 1) + " s");
+
+        // A pause of 4 s between phrases still counts as playing.
+        d.reset();
+        const auto phrases = run (d, 40.0, [&] (double t) { return std::fmod (t, 10.0) < 6.0 ? 0.2f : 0.002f; });
+        check (phrases > 39.0, "short pauses between phrases count: " + juce::String (phrases, 1) + " of 40 s");
+    }
+
+    juce::TemporaryFile tempRoot;
+    const auto root = tempRoot.getFile();
+    root.createDirectory();
+
+    // --- Setup: XML round trip and portable paths.
+    {
+        PracticeSetup s;
+        s.songPath = "Autumn Leaves/backing.mp3";
+        s.speed = 0.85; s.semitones = -2.0; s.loopStart = 12.5; s.loopEnd = 20.0; s.loopOn = true;
+        s.metronome = true; s.bpm = 112.0; s.beatsPerBar = 3; s.subdivision = 2;
+        juce::XmlElement e ("SETUP");
+        s.toXml (e);
+        const auto r = PracticeSetup::fromXml (e);
+        check (r.songPath == s.songPath && std::abs (r.speed - 0.85) < 1.0e-9 && r.semitones == -2.0 && r.loopStart == 12.5
+                   && r.loopEnd == 20.0 && r.loopOn && r.metronome && r.bpm == 112.0 && r.beatsPerBar == 3 && r.subdivision == 2,
+               "setup survives XML");
+
+        const auto inside = root.getChildFile ("Topic A").getChildFile ("song.mp3");
+        const auto portable = PracticeSetup::portablePath (inside, root);
+        check (portable == "Topic A/song.mp3" && PracticeSetup::resolvePath (portable, root) == inside,
+               "song inside the library is stored relative to it: " + portable);
+        const auto outside = root.getParentDirectory().getChildFile ("elsewhere.mp3");
+        check (PracticeSetup::portablePath (outside, root) == outside.getFullPathName(), "song outside the library keeps its full path");
+        check (PracticeSetup::resolvePath ("../secret.mp3", root) == juce::File(), "relative paths can't leave the library");
+    }
+
+    // --- Log: two devices share a folder, each writes its own file.
+    const auto logFolder = root.getChildFile (".practice");
+    const auto day = juce::Time (2026, 10, 10, 18, 0, 0, 0, true);   // 10 Nov 2026 (month is 0-based)
+    {
+        PracticeLog pc (logFolder, "aaaaaaaa");
+        PracticeLog ipad (logFolder, "bbbbbbbb");
+
+        PracticeEntry e;
+        e.id = "e1"; e.topicId = "T1"; e.topicTitle = "Sweep picking";
+        e.start = day; e.end = day + juce::RelativeTime::minutes (15);
+        e.playedSeconds = 600.0; e.maxBpm = 100.0;
+        e.setup.metronome = true; e.setup.bpm = 90.0;
+        check (pc.save (e), "entry written");
+
+        PracticeEntry f = e;
+        f.id = "e2"; f.start = day + juce::RelativeTime::days (1); f.end = f.start + juce::RelativeTime::minutes (10);
+        f.playedSeconds = 300.0; f.maxBpm = 0.0; f.maxSpeed = 0.75; f.setup = {}; f.note = "bar 3 still sloppy";
+        check (ipad.save (f), "second device writes too");
+
+        check (logFolder.findChildFiles (juce::File::findFiles, false, "log-*.xml").size() == 2, "one file per device");
+
+        PracticeLog reader (logFolder, "cccccccc");
+        check (reader.getEntries().size() == 2 && reader.getEntries()[0].id == "e1" && reader.getEntries()[1].note == "bar 3 still sloppy",
+               "a third device reads both, oldest first, notes kept");
+
+        const auto sum = reader.summarise ("T1");
+        check (sum.sessions == 2 && sum.totalSeconds == 900.0 && sum.last == f.end && sum.lastBpm == 100.0 && std::abs (sum.lastSpeed - 0.75) < 1.0e-9,
+               "summary: sessions, total, last practised, last tempo and speed");
+        check (reader.summarise ("nope").last == juce::Time(), "unknown topic: never practised");
+
+        const auto* withSetup = reader.latestSetupFor ("T1");
+        check (withSetup != nullptr && withSetup->id == "e1", "latest restorable setup skips entries without one");
+
+        check (reader.playedBetween (day - juce::RelativeTime::hours (1), day + juce::RelativeTime::hours (23)) == 600.0,
+               "played time of one day");
+
+        // Updating an entry replaces it.
+        e.playedSeconds = 700.0;
+        pc.save (e);
+        reader.reload();
+        check (reader.getEntries().size() == 2 && reader.summarise ("T1").totalSeconds == 1000.0, "saving the same entry again replaces it");
+        check (reader.computeSignature() == PracticeLog (logFolder, "dddddddd").computeSignature(), "signature is stable");
+    }
+
+    // --- Tracker
+    {
+        PracticeLog log (root.getChildFile (".tracker"), "aaaaaaaa");
+        PracticeTracker tracker;
+        tracker.setLog (&log);
+        tracker.captureSetup = [] { PracticeSetup s; s.metronome = true; s.bpm = 80.0; return s; };
+        int saves = 0;
+        tracker.onSaved = [&] { ++saves; };
+
+        auto now = day;
+        auto play = [&] (double seconds, float level, const PracticeTracker::Activity& a)
+        {
+            for (double t = 0.0; t < seconds - 1.0e-9; t += 0.1)
+            {
+                now = now + juce::RelativeTime::milliseconds (100);
+                tracker.tick (0.1, level, a, now);
+            }
+        };
+
+        PracticeTracker::Activity idle, metronome;
+        metronome.metronomeRunning = true;
+        metronome.bpm = 120.0;
+
+        tracker.setActiveTopic ("T1", "Sweep picking");
+        play (10.0, 0.002f, idle);
+        check (tracker.getCurrent() == nullptr, "no entry until you play");
+
+        tracker.setNote ("warm up first");
+        play (10.0, 0.3f, metronome);
+        check (tracker.getCurrent() != nullptr && tracker.getCurrent()->note == "warm up first", "playing opens an entry with the note typed before");
+        tracker.finish();
+        check (log.getEntries().empty(), "entries shorter than 20 s are dropped");
+
+        play (90.0, 0.3f, metronome);
+        check (saves == 1 && log.getEntries().size() == 1, "saved after a minute of playing, while still open");
+        check (std::abs (tracker.getActiveSeconds() - 100.0) < 0.5, "active time counts every entry of the topic: " + juce::String (tracker.getActiveSeconds(), 1));
+
+        PracticeTracker::Activity faster = metronome;
+        faster.bpm = 126.0;
+        play (10.0, 0.002f, metronome);
+        play (5.0, 0.002f, faster);    // tempo raised after you stopped: doesn't count
+        play (5.0, 0.3f, metronome);
+
+        tracker.setActiveTopic ("T2", "Autumn Leaves");   // closes the T1 entry
+        check (log.getEntries().size() == 1 && log.getEntries()[0].maxBpm == 120.0 && log.getEntries()[0].topicId == "T1"
+                   && log.getEntries()[0].setup.bpm == 80.0,
+               "switching topic closes the entry: max tempo only while playing, setup captured");
+        const auto t1Played = log.getEntries()[0].playedSeconds;
+        check (t1Played > 99.0 && t1Played < 106.0, "T1 played time includes the grace after stopping: " + juce::String (t1Played, 1) + " s");
+
+        PracticeTracker::Activity song;
+        song.songPlaying = true;
+        song.speed = 0.8;
+        song.songName = "backing.mp3";
+        play (30.0, 0.3f, song);
+        play (PracticeTracker::idleGapSeconds + 10.0, 0.002f, song);
+        check (tracker.getCurrent() == nullptr && log.getEntries().size() == 2 && std::abs (log.getEntries()[1].maxSpeed - 0.8) < 1.0e-9
+                   && log.getEntries()[1].songName == "backing.mp3",
+               "five minutes of silence closes the entry");
+
+        play (25.0, 0.3f, song);
+        play (6.0, 0.002f, song);   // stopped playing (past the grace period)
+        tracker.finish();
+        tracker.setNote ("felt good at 80 %");
+        check (tracker.getNote() == "felt good at 80 %", "a note typed right after stopping belongs to the entry that ended");
+        play (1.0, 0.002f, song);
+        check (log.getEntries().size() == 3 && log.getEntries()[2].note.isEmpty(), "the note isn't written on every keystroke");
+        play (2.0, 0.002f, song);
+        check (log.getEntries()[2].note == "felt good at 80 %", "...but a moment after the last one");
+        play (25.0, 0.3f, song);
+        tracker.setActiveTopic ({}, {});
+        play (25.0, 0.3f, idle);
+        tracker.finish();
+        check (log.getEntries().size() == 5 && log.getEntries()[4].isFree() && log.getEntries()[3].note.isEmpty(),
+               "stopping the topic: playing is logged as free practice");
+
+        // Suspended app: a long gap between ticks isn't counted as playing.
+        tracker.setActiveTopic ("T3", "Scales");
+        tracker.tick (3600.0, 0.3f, idle, now);
+        check (tracker.getCurrent() != nullptr && tracker.getCurrent()->playedSeconds <= 5.0, "a long gap between ticks counts at most 5 s");
+        tracker.setLog (nullptr);
+    }
+
+    // --- Library: rotation flag, song lookup, app data ignored by the change check.
+    {
+        Library lib (root);
+        auto* t = lib.createTopic ("Alternate picking");
+        t->inRotation = true;
+        lib.saveTopic (*t);
+        const auto folder = t->folder;
+        const auto id = t->id;
+
+        Library again (root);
+        check (again.findTopic (id) != nullptr && again.findTopic (id)->inRotation, "rotation flag saved in topic.xml");
+        check (again.findTopicForFile (folder.getChildFile ("track.mp3")) == again.findTopic (id)
+                   && again.findTopicForFile (root.getChildFile ("loose.mp3")) == nullptr,
+               "a song in a topic's folder belongs to that topic");
+
+        const auto sig = again.computeSignature();
+        root.getChildFile (".practice").getChildFile ("log-x-2026.xml").replaceWithText ("<PRACTICELOG/>");
+        check (again.computeSignature() == sig, "writing the practice log doesn't look like a topic change");
+        check (std::none_of (again.getTopics().begin(), again.getTopics().end(), [] (const Topic& x) { return x.title.startsWith ("."); }),
+               "the .practice folder is not a topic");
+    }
+
+    // Formatting
+    check (formatPracticeDuration (10.0) == "< 1 min" && formatPracticeDuration (12 * 60.0) == "12 min"
+               && formatPracticeDuration (65 * 60.0) == "1 h 05 min",
+           "durations: " + formatPracticeDuration (65 * 60.0));
+    check (formatPracticeAgo (juce::Time(), day) == "never" && formatPracticeAgo (day, day) == "today"
+               && formatPracticeAgo (day - juce::RelativeTime::days (1), day) == "yesterday"
+               && formatPracticeAgo (day - juce::RelativeTime::days (5), day) == "5 days ago"
+               && formatPracticeAgo (day - juce::RelativeTime::days (21), day) == "3 weeks ago",
+           "'ago' texts");
+
+    root.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2017,6 +2252,7 @@ int main()
     testTuner();
     testTunings();
     testLibrary();
+    testPracticeLog();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

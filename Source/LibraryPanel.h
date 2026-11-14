@@ -28,6 +28,22 @@ public:
     std::function<void (const juce::File&)> onOpenAudio;
     std::function<void (const YouTubeLink&, const juce::String& title)> onOpenYouTube;
 
+    std::function<void()> onLibraryOpened;                         // a (different) library folder was opened
+    std::function<void()> onTopicsChanged;                         // titles, rotation, topics added/removed...
+    std::function<void (const juce::String& topicId)> onTopicOpened;   // one of its resources was opened
+    std::function<void (const juce::String& topicId)> onPractise;      // the topic's "Practise" button
+
+    Library* getLibrary() const noexcept            { return library.get(); }
+
+    /** Shows the topic (clears search and tag filter if they hide it). */
+    void selectTopic (const juce::String& topicId);
+
+    /** Re-reads the folder if anything changed on disk (e.g. from another device). */
+    void checkForChanges();
+
+    /** Opens the topic's first song or YouTube video; false if it has none. */
+    bool openFirstMedia (const juce::String& topicId);
+
     /** Writes any pending edit to disk (also called when the app quits). */
     void flush();
 
@@ -57,6 +73,7 @@ private:
     void newTopic();
     void deleteTopic (const juce::String& topicId);
     void editedTopic();                        // a title/description keystroke: save soon
+    void setRotation (const juce::String& topicId, bool inRotation);
     void addFiles (const juce::String& topicId);
     void addUrls (const juce::String& topicId, const juce::Array<juce::URL>&);
     void showTagMenu();

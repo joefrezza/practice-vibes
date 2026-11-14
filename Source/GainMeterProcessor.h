@@ -35,6 +35,9 @@ public:
     /** Returns the peak level since the last call, and resets it. */
     float takePeak() noexcept { return peak.exchange (0.0f); }
 
+    /** Same peak, for a second reader (the practice log listens for playing; the meter keeps its own). */
+    float takeActivityPeak() noexcept { return activityPeak.exchange (0.0f); }
+
     //==============================================================================
     const juce::String getName() const override { return name; }
 
@@ -62,6 +65,9 @@ public:
 
         if (blockPeak > peak.load (std::memory_order_relaxed))
             peak.store (blockPeak, std::memory_order_relaxed);
+
+        if (blockPeak > activityPeak.load (std::memory_order_relaxed))
+            activityPeak.store (blockPeak, std::memory_order_relaxed);
     }
 
     using AudioProcessor::processBlock;
@@ -85,7 +91,7 @@ private:
     juce::String name;
     float lastGain = 1.0f;
     double sampleRate = 44100.0;
-    std::atomic<float> peak { 0.0f };
+    std::atomic<float> peak { 0.0f }, activityPeak { 0.0f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GainMeterProcessor)
 };
