@@ -31,6 +31,7 @@ AppEngine::AppEngine()
     looper = std::make_unique<Looper> (*metronome);
     chain->setLooperNodes (looper->createBeforeFxNode(), looper->createAfterFxNode());
     chain->setBlockListener (this);
+    chain->setPlayHead (&playHead);
     startTimerHz (2);
     catalogue = std::make_unique<PluginCatalogue> (formatManager);
     midi = std::make_unique<MidiMonitor> (deviceManager);
@@ -165,8 +166,9 @@ void AppEngine::changeListenerCallback (juce::ChangeBroadcaster*)
 
 void AppEngine::beginBlock (juce::int64 blockStart, int numSamples)
 {
-    // Audio thread: the bar clock first, then the looper, which reads this block's bar lines.
+    // Audio thread: the bar clock first, then what reads this block's bar lines.
     metronome->advanceClock (blockStart, numSamples);
+    playHead.update (*metronome, blockStart);
     looper->beginBlock (blockStart, numSamples);
 }
 

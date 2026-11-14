@@ -197,6 +197,8 @@ MainComponent::MainComponent (AppEngine& e, AppLog& appLog)
 
     rigPanel->showOverlay = [this] (const juce::String& title, std::unique_ptr<juce::Component> c) { showOverlay (title, std::move (c)); };
     rigPanel->hideOverlay = [this] { closeOverlay(); };
+    looperPanel->showOverlay = [this] (const juce::String& title, std::unique_ptr<juce::Component> c) { showOverlay (title, std::move (c)); };
+    looperPanel->hideOverlay = [this] { closeOverlay(); };
 
     tabs.setTabBarDepth (42);
     tabs.setOutline (0);

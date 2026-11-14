@@ -16,6 +16,10 @@ namespace pv
           -> [looper, after FX: records the processed guitar,    |
               plays "after FX" loops]  ----------------------------+-> master (meter) -> device output
         other sources (song player, metronome...)  ---------------+
+        drum machine (instrument plugin) -> drums stage (gain) ---+
+
+    The drum machine sits outside the guitar path: monitoring off does not mute it and
+    the looper does not record it. Every plugin gets the play head set with setPlayHead().
 
     All methods must be called on the message thread.
 */
@@ -59,6 +63,17 @@ public:
         return raw;
     }
 
+    /** The drum machine slot: one instrument plugin mixed straight into the master. */
+    void setDrumPlugin (const juce::PluginDescription&, LoadCallback onDone = {});
+    void removeDrumPlugin();
+    juce::AudioPluginInstance* getDrumPlugin() const;
+    juce::String getDrumPluginName() const;
+    juce::String getDrumPluginIdentifier() const;      // PluginDescription::createIdentifierString(), "" if none
+    GainMeterProcessor& getDrumStage() const;
+
+    /** The transport every plugin sees (see BarClockPlayHead). Must outlive the chain. */
+    void setPlayHead (juce::AudioPlayHead* playHead)   { graph.setPlayHead (playHead); }
+
     /** Inserts the looper's two nodes (see Looper). Call once, before audio starts. */
     void setLooperNodes (std::unique_ptr<juce::AudioProcessor> beforeFx, std::unique_ptr<juce::AudioProcessor> afterFx);
 
@@ -101,7 +116,9 @@ private:
         bool bypassed = false;
     };
 
-    void loadPlugin (const juce::PluginDescription&, NodeCallback);
+    void loadPlugin (const juce::PluginDescription&, NodeCallback);     // adds the node, unconnected
+    void addSlot (NodePtr);
+    void restoreDrums (const juce::XmlElement&);
     void restoreNext (std::shared_ptr<std::vector<PendingSlot>>, size_t index, std::function<void()> onDone);
     void rebuildConnections();
     void notifyChange();
@@ -139,8 +156,10 @@ private:
     std::atomic<BlockListener*> blockListener { nullptr };
 
     NodePtr audioInNode, audioOutNode, inputStageNode, outputStageNode, masterNode;
-    NodePtr looperBeforeNode, looperAfterNode;
+    NodePtr looperBeforeNode, looperAfterNode, drumStageNode;
     std::vector<Slot> slots;
+    Slot drums;                         // node == nullptr when empty
+    int drumRequest = 0;                // only the latest setDrumPlugin() call wins
     std::vector<NodePtr> sources;
     int inputChannel = 0;
 

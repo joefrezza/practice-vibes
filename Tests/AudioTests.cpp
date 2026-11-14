@@ -1,6 +1,7 @@
 // Offline checks of the song player, metronome and looper DSP. Run: PracticeVibesTests(.exe)
 // Exit code 0 = all passed.
 
+#include "../Source/BarClockPlayHead.h"
 #include "../Source/ChordAnalyzer.h"
 #include "../Source/Looper.h"
 #include "../Source/MetronomeProcessor.h"
@@ -784,6 +785,81 @@ namespace
 
     /** Metronome following the song's beat grid through the player, at two speeds,
         in both processing orders, and across a loop jump. */
+    void testPlayHead()
+    {
+        std::cout << "Play head (bar clock -> plugins)" << std::endl;
+
+        const double rate = 48000.0;
+        const int block = 480;
+        MetronomeProcessor metronome;
+        metronome.prepareToPlay (rate, block);
+        metronome.startBpm = 120.0;
+        metronome.beatsPerBar = 4;
+
+        juce::int64 time = 0;
+        juce::AudioBuffer<float> buffer (2, block);
+        juce::MidiBuffer midi;
+
+        // Like the app: advance the clock, read the play head, then run the graph.
+        auto step = [&]
+        {
+            metronome.advanceClock (time, block);
+            const auto s = BarClockPlayHead::compute (metronome, time, rate);
+            metronome.processBlock (buffer, midi);
+            time += block;
+            return s;
+        };
+
+        auto s = step();
+        check (! s.playing && std::abs (s.bpm - 120.0) < 1.0e-9 && s.numerator == 4, "stopped: not playing, shows the set tempo and meter");
+
+        metronome.start();
+        s = step();
+        check (s.playing && std::abs (s.ppq) < 1.0e-9 && s.ppqOfBarStart == 0.0, "starts at ppq 0, bar 1");
+
+        // 2 s at 120 bpm = 4 beats = one bar
+        for (int i = 1; i < 200; ++i)
+            s = step();
+
+        s = step();
+        check (std::abs (s.ppq - 4.0) < 1.0e-6 && std::abs (s.ppqOfBarStart - 4.0) < 1.0e-9 && s.barCount == 1,
+               "after 2 s: ppq " + juce::String (s.ppq, 4) + ", bar start " + juce::String (s.ppqOfBarStart) + " (want 4, 4)");
+
+        // Tempo changes (user + trainer steps) keep the position continuous and bars whole.
+        metronome.trainerEnabled = true;
+        metronome.trainerStepBpm = 7.0;
+        metronome.trainerInterval = 1.0;
+        metronome.trainerUnit = (int) MetronomeProcessor::IntervalUnit::bars;
+        metronome.trainerMaxBpm = 200.0;
+        metronome.startBpm = 90.0;
+        metronome.tempoChangedByUser();
+
+        bool continuous = true, barsOk = true;
+        auto previous = s;
+
+        for (int i = 0; i < 2000; ++i)
+        {
+            s = step();
+            const auto delta = s.ppq - previous.ppq;
+            const auto slowest = block / (rate * 60.0 / 90.0), fastest = block / (rate * 60.0 / 200.0);
+
+            if (continuous && ! (delta > slowest * 0.999 && delta < fastest * 1.001))
+                std::cout << "    jump at block " << i << ": delta " << delta << " ppq " << s.ppq << " bpm " << s.bpm << " prev bpm " << previous.bpm << std::endl;
+
+            continuous = continuous && delta > slowest * 0.999 && delta < fastest * 1.001;
+            barsOk = barsOk && std::fmod (s.ppqOfBarStart, 4.0) < 1.0e-6 && s.ppq - s.ppqOfBarStart >= -1.0e-6
+                            && s.ppq - s.ppqOfBarStart < 4.0 + 1.0e-6;
+            previous = s;
+        }
+
+        check (continuous, "ppq advances smoothly through tempo changes (now " + juce::String (s.bpm, 1) + " bpm)");
+        check (barsOk, "bar starts stay on whole 4/4 bars");
+
+        metronome.stop();
+        s = step();
+        check (! s.playing, "metronome stopped: plugins see the transport stop");
+    }
+
     void testFollowSong()
     {
         std::cout << "Metronome follows song" << std::endl;
@@ -921,6 +997,7 @@ int main()
     testMeters();
     testFollowSong();
     testLooper();
+    testPlayHead();
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

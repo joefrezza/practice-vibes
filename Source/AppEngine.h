@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_utils/juce_audio_utils.h>
+#include "BarClockPlayHead.h"
 #include "Looper.h"
 #include "MetronomeProcessor.h"
 #include "MidiMonitor.h"
@@ -30,6 +31,9 @@ public:
 
     juce::AudioDeviceManager deviceManager;
     juce::AudioPluginFormatManager formatManager;
+
+    // The transport all plugins see (declared before the chain, so it outlives it).
+    BarClockPlayHead playHead;
 
     std::unique_ptr<PluginChain> chain;
     std::unique_ptr<PluginCatalogue> catalogue;

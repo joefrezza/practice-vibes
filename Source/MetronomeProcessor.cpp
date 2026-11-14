@@ -247,6 +247,9 @@ void MetronomeProcessor::advanceClock (juce::int64 blockStart, int numSamples)
         }
 
         currentBpm = bpm;
+        barPpq = 0.0;
+        previousBarBeats = barBeats;
+        previousBeatSamples = beatSamples;
         clockRunning = true;
     }
 
@@ -287,6 +290,9 @@ void MetronomeProcessor::advanceClock (juce::int64 blockStart, int numSamples)
                 break;
 
             barStart += barBeats * beatSamples;
+            barPpq += barBeats;
+            previousBarBeats = barBeats;
+            previousBeatSamples = beatSamples;      // onBarLine() may change the tempo
             nextBeat = 0;
             nextTick = 0;
             onBarLine();
@@ -334,7 +340,7 @@ void MetronomeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
     auto* left = buffer.getWritePointer (0);
     auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
-    const auto targetGain = gain.load();
+    const auto targetGain = clicksMuted.load() ? 0.0f : gain.load();
     const auto isRunning = running.load();
 
     // Follow mode: ticks come from the song's beat grid, placed where the player is.

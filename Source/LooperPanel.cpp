@@ -338,12 +338,144 @@ LooperPanel::LooperPanel (AppEngine& e)
         addAndMakeVisible (*rows[(size_t) t]);
     }
 
+    // Drum machine
+    styleLabel (drumsLabel, "Drums");
+    styleLabel (drumStatus, {}, 0.6f);
+    drumBox.setTooltip ("An instrument plugin with its own patterns (drum machine, groove player). "
+                        "It plays with the metronome: same tempo and bars, starts and stops with it.");
+    drumBox.onChange = [this] { drumChosen(); };
+    drumEditButton.onClick = [this] { openDrumEditor(); };
+
+    drumVolume.setSliderStyle (juce::Slider::LinearHorizontal);
+    drumVolume.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    drumVolume.setRange (0.0, 1.5, 0.01);
+    drumVolume.setValue (engine.chain->getDrumStage().gain.load(), juce::dontSendNotification);
+    drumVolume.setDoubleClickReturnValue (true, 0.8);
+    drumVolume.setTooltip ("Drum machine volume");
+    drumVolume.onValueChange = [this] { engine.chain->getDrumStage().gain = (float) drumVolume.getValue(); };
+
+    clicksMutedButton.setTooltip ("Silence the metronome clicks (the clock keeps running, so the drums and loops stay in time).");
+    clicksMutedButton.setToggleState (metronome.clicksMuted.load(), juce::dontSendNotification);
+    clicksMutedButton.onClick = [this]
+    {
+        metronome.clicksMuted = clicksMutedButton.getToggleState();
+        saveSettings();
+    };
+
+    for (auto* c : std::initializer_list<juce::Component*> { &drumsLabel, &drumBox, &drumEditButton, &drumVolume, &clicksMutedButton, &drumStatus })
+        addAndMakeVisible (*c);
+
+    engine.catalogue->addChangeListener (this);
+    refreshDrumList();
+
     startTimerHz (30);
 }
 
 LooperPanel::~LooperPanel()
 {
+    engine.catalogue->removeChangeListener (this);
     saveSettings();
+}
+
+//==============================================================================
+void LooperPanel::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    refreshDrumList();
+}
+
+void LooperPanel::refreshDrumList()
+{
+    drumEntries.clear();
+
+    for (auto& entry : engine.catalogue->getEntries())
+        if (entry.kind == "Instrument" || entry.kind == "Generator")
+            drumEntries.push_back (entry);
+
+    // The loaded plugin stays selectable even when the catalogue does not list it (yet).
+    const auto current = engine.chain->getDrumPluginIdentifier();
+    bool listed = current.isEmpty();
+
+    for (auto& entry : drumEntries)
+        listed = listed || entry.description.createIdentifierString() == current;
+
+    if (! listed)
+        if (auto* plugin = engine.chain->getDrumPlugin())
+            drumEntries.insert (drumEntries.begin(), { plugin->getPluginDescription(), "Instrument" });
+
+    drumBox.clear (juce::dontSendNotification);
+    drumBox.addItem ("None", 1);
+
+    for (size_t i = 0; i < drumEntries.size(); ++i)
+    {
+        const auto& d = drumEntries[i].description;
+        drumBox.addItem (d.name + (d.manufacturerName.isNotEmpty() ? " (" + d.manufacturerName + ")" : juce::String()), (int) i + 2);
+    }
+
+    shownDrumIdentifier = "-";      // re-selected by the timer
+}
+
+void LooperPanel::drumChosen()
+{
+    const auto index = drumBox.getSelectedId() - 2;
+    drumStatus.setText ({}, juce::dontSendNotification);
+
+    if (index < 0)
+    {
+        if (hideOverlay && engine.chain->getDrumPlugin() != nullptr)
+            hideOverlay();      // the drum UI may be open
+
+        engine.chain->removeDrumPlugin();
+        drumLoading = false;
+        engine.saveState();
+        return;
+    }
+
+    if (! juce::isPositiveAndBelow (index, (int) drumEntries.size()))
+        return;
+
+    const auto description = drumEntries[(size_t) index].description;
+
+    if (description.createIdentifierString() == engine.chain->getDrumPluginIdentifier())
+        return;
+
+    if (hideOverlay && engine.chain->getDrumPlugin() != nullptr)
+        hideOverlay();      // the old plugin's editor must go before the plugin does
+
+    drumLoading = true;
+    engine.chain->setDrumPlugin (description, [safeThis = SafePointer<LooperPanel> (this)] (const juce::String& error)
+    {
+        if (safeThis == nullptr)
+            return;
+
+        safeThis->drumLoading = false;
+        safeThis->shownDrumIdentifier = "-";
+
+        if (error.isNotEmpty())
+            safeThis->drumStatus.setText ("Could not load: " + error, juce::dontSendNotification);
+        else
+            safeThis->engine.saveState();
+    });
+}
+
+void LooperPanel::openDrumEditor()
+{
+    auto* plugin = engine.chain->getDrumPlugin();
+
+    if (plugin == nullptr || ! showOverlay)
+        return;
+
+    if (hideOverlay)
+        hideOverlay();      // a plugin must never have two editors at once
+
+    std::unique_ptr<juce::Component> editor;
+
+    if (plugin->hasEditor())
+        editor.reset (plugin->createEditorAndMakeActive());
+
+    if (editor == nullptr)
+        editor = std::make_unique<juce::GenericAudioProcessorEditor> (*plugin);
+
+    showOverlay ("Drums: " + engine.chain->getDrumPluginName(), std::move (editor));
 }
 
 //==============================================================================
@@ -354,6 +486,7 @@ void LooperPanel::loadSettings()
         looper.source = juce::jlimit (0, 1, xml->getIntAttribute ("source", 0));
         looper.fixedBars = juce::jlimit (0, 16, xml->getIntAttribute ("fixedBars", 0));
         looper.latencyOffsetMs = (float) juce::jlimit (-100.0, 100.0, xml->getDoubleAttribute ("latencyOffsetMs", 0.0));
+        metronome.clicksMuted = xml->getBoolAttribute ("clicksMuted", false);
     }
 }
 
@@ -363,6 +496,7 @@ void LooperPanel::saveSettings() const
     xml.setAttribute ("source", looper.source.load());
     xml.setAttribute ("fixedBars", looper.fixedBars.load());
     xml.setAttribute ("latencyOffsetMs", (double) looper.latencyOffsetMs.load());
+    xml.setAttribute ("clicksMuted", metronome.clicksMuted.load());
     xml.writeTo (getLooperSettingsFile());
 }
 
@@ -439,6 +573,51 @@ void LooperPanel::timerCallback()
         hint << (hint.isEmpty() ? "" : "\n") << "\"Follow song beats\" is paused while there are loops.";
 
     hintLabel.setText (hint, juce::dontSendNotification);
+
+    // Drum machine: follow the chain (it is restored at start-up, after this panel exists).
+    const auto drumId = engine.chain->getDrumPluginIdentifier();
+
+    if (! drumLoading && drumId != shownDrumIdentifier && ! drumBox.isPopupActive())
+    {
+        int selected = drumId.isEmpty() ? 1 : 0;
+
+        for (size_t i = 0; i < drumEntries.size() && selected == 0; ++i)
+            if (drumEntries[i].description.createIdentifierString() == drumId)
+                selected = (int) i + 2;
+
+        if (selected == 0)
+        {
+            refreshDrumList();      // loaded but not listed: the next tick selects it
+        }
+        else
+        {
+            drumBox.setSelectedId (selected, juce::dontSendNotification);
+            shownDrumIdentifier = drumId;
+        }
+    }
+
+    const auto hasDrums = engine.chain->getDrumPlugin() != nullptr;
+    drumEditButton.setEnabled (hasDrums && ! drumLoading);
+    drumBox.setEnabled (! drumLoading);
+
+    if (! drumVolume.isMouseButtonDown())
+        drumVolume.setValue (engine.chain->getDrumStage().gain.load(), juce::dontSendNotification);
+
+    if (clicksMutedButton.getToggleState() != metronome.clicksMuted.load())
+        clicksMutedButton.setToggleState (metronome.clicksMuted.load(), juce::dontSendNotification);
+
+    juce::String status;
+
+    if (drumLoading)
+        status = "Loading...";
+    else if (drumStatus.getText().startsWith ("Could not"))
+        status = drumStatus.getText();
+    else if (hasDrums)
+        status = metronome.isRunning() ? "Playing along with the metronome" : "Starts and stops with the metronome";
+    else if (drumEntries.empty())
+        status = engine.catalogue->canScan() ? "No instruments found: Scan VST3 in the Guitar rig tab" : "No instrument plugins found";
+
+    drumStatus.setText (status, juce::dontSendNotification);
 }
 
 //==============================================================================
@@ -472,6 +651,15 @@ void LooperPanel::resized()
     beatsBox.setBounds (metro.removeFromRight (70).reduced (2, 6));
     beatsLabel.setBounds (metro.removeFromRight (110));
     tempoSlider.setBounds (metro.reduced (0, 6));
+
+    area.removeFromTop (4);
+    auto drumRow = area.removeFromTop (44);
+    drumsLabel.setBounds (drumRow.removeFromLeft (64));
+    drumBox.setBounds (drumRow.removeFromLeft (juce::jmin (300, drumRow.getWidth() / 3)).reduced (2, 6));
+    drumEditButton.setBounds (drumRow.removeFromLeft (100).reduced (2, 4));
+    drumVolume.setBounds (drumRow.removeFromLeft (juce::jmin (200, drumRow.getWidth() / 4)).reduced (6, 6));
+    clicksMutedButton.setBounds (drumRow.removeFromLeft (130).reduced (2, 4));
+    drumStatus.setBounds (drumRow.reduced (8, 0));
 
     area.removeFromTop (8);
 

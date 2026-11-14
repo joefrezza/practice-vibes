@@ -34,6 +34,7 @@ public:
     std::atomic<int> subdivision { (int) Subdivision::quarters };
     std::atomic<int> sound { (int) Sound::beep };
     std::atomic<float> subdivisionLevel { 0.45f };   // relative to a normal beat
+    std::atomic<bool> clicksMuted { false };         // silent clicks, clock keeps running (e.g. drum plugin plays)
 
     std::atomic<bool> trainerEnabled { false };
     std::atomic<double> trainerStepBpm { 2.0 };
@@ -70,6 +71,10 @@ public:
     double getClockBarSamples() const noexcept  { return barBeats * beatSamples; }
     int getClockBeatsPerBar() const noexcept    { return barBeats; }
     double getClockStartTime() const noexcept   { return clockStartTime; }      // first downbeat after start()
+    double getClockBeatSamples() const noexcept { return beatSamples; }
+    double getClockBarPpq() const noexcept      { return barPpq; }              // beats from start() to barStart
+    int getClockPreviousBarBeats() const noexcept { return previousBarBeats; }
+    double getClockPreviousBeatSamples() const noexcept { return previousBeatSamples; }   // the bar before barStart
 
     /** Audio thread: while locked (the looper holds loops) tempo and bar length are frozen to this
         grid, follow mode and the trainer pause, and start() lines the clicks up with the grid. */
@@ -151,7 +156,9 @@ private:
     bool clockRunning = false, clockAdvanced = false, resetVoices = false;
     juce::int64 nextBlockStart = 0;
     double barStart = 0.0, beatSamples = 24000.0, clockStartTime = 0.0;
-    int barBeats = 4, lastTicks = 1;
+    // For plugins' play head: beats counted from start() up to barStart, and the bar before it.
+    double barPpq = 0.0, previousBeatSamples = 24000.0;
+    int barBeats = 4, lastTicks = 1, previousBarBeats = 4;
     int nextBeat = 0, nextTick = 0;     // the NEXT tick within the current bar
     std::vector<Tick> clockTicks;
     double bpm = 100.0;
